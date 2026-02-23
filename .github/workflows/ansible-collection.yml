@@ -181,7 +181,7 @@ jobs:
       - sanity
       - molecule
 
-    runs-on: ${{ inputs.platform }}
+    runs-on: "ubuntu-latest"
 
     steps:
       - name: Decide whether the needed jobs succeeded or failed
