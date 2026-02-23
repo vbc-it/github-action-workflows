@@ -2,6 +2,12 @@
 name: ansible-collection-tests
 on:
   workflow_call:
+    inputs:
+      platform:
+        description: 'The platform to run sanity tests on'
+        required: true
+        default: 'ubuntu-latest'
+        type: string
 
 concurrency:
   group: >-
@@ -13,7 +19,7 @@ concurrency:
 jobs:
 
   pre-commit:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.platform }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,7 +54,7 @@ jobs:
           - devel
         # - milestone
 
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.platform }}
 
     steps:
       # Run sanity tests inside a Docker container.
@@ -73,7 +79,7 @@ jobs:
 
 
   discover:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.platform }}
     needs: sanity
     outputs:
       roles: ${{ steps.transform.outputs.directories }}
@@ -138,7 +144,7 @@ jobs:
 
   molecule:
     needs: discover
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.platform }}
     if: ${{ needs.discover.outputs.roles != '' && toJson(fromJson(needs.discover.outputs.roles)) != '[]' }}
     strategy:
       matrix:
@@ -176,7 +182,7 @@ jobs:
       - sanity
       - molecule
 
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.platform }}
 
     steps:
       - name: Decide whether the needed jobs succeeded or failed
