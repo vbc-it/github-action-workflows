@@ -135,8 +135,12 @@ jobs:
             do
               echo "Checking if roles/$folder exists";
               if [ -d "roles/$folder" ]; then
-                  echo "roles/$folder exists";
-                  existing_folders+=("$folder")
+                  if [ -d "roles/$folder/molecule" ]; then
+                    echo "roles/$folder has molecule tests";
+                    existing_folders+=("$folder")
+                  else
+                    echo "roles/$folder has no molecule directory, skipping";
+                  fi
               fi
             done
           echo "directories=$(jq --compact-output --null-input '$ARGS.positional' --args -- ${existing_folders[@]})" >> $GITHUB_OUTPUT
