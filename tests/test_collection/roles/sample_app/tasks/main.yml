@@ -3,3 +3,4 @@
   ansible.builtin.file:
     path: /tmp/sample_app_installed
     state: touch
+    mode: '0644'

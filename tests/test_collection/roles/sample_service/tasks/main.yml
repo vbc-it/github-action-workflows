@@ -5,3 +5,4 @@
     content: |
       service: example
       enabled: true
+    mode: '0644'
