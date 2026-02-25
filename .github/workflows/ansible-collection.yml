@@ -82,6 +82,7 @@ jobs:
     needs: sanity
     outputs:
       roles: ${{ steps.transform.outputs.directories }}
+      role_scenarios: ${{ steps.transform.outputs.role_scenarios }}
     steps:
       - uses: actions/checkout@v6
 
@@ -130,6 +131,7 @@ jobs:
           unique_folders=($(printf "%s\n" "${folders[@]}" | sort -u | tr '\n' ' '))
           echo "Found ${#unique_folders[@]} roles";
           existing_folders=()
+          role_scenarios=()
           echo "Checking if roles still exists ";
           for folder in ${unique_folders[*]};
             do
@@ -138,20 +140,31 @@ jobs:
                   if [ -d "roles/$folder/molecule" ]; then
                     echo "roles/$folder has molecule tests";
                     existing_folders+=("$folder")
+                    scenarios=$(find "roles/$folder/molecule" -maxdepth 1 -mindepth 1 -type d -printf '%f\n')
+                    for scenario in $scenarios;
+                      do
+                        role_scenarios+=("${folder}:${scenario}")
+                      done
                   else
                     echo "roles/$folder has no molecule directory, skipping";
                   fi
               fi
             done
           echo "directories=$(jq --compact-output --null-input '$ARGS.positional' --args -- ${existing_folders[@]})" >> $GITHUB_OUTPUT
+          if [ ${#role_scenarios[@]} -eq 0 ]; then
+            echo 'role_scenarios=[]' >> $GITHUB_OUTPUT
+          else
+            scenario_json=$(printf "%s\n" "${role_scenarios[@]}" | awk -F: '{printf "{\"role\":\"%s\",\"scenario\":\"%s\"}\n",$1,$2}' | jq -cs '.')
+            echo "role_scenarios=${scenario_json}" >> $GITHUB_OUTPUT
+          fi
 
   molecule:
     needs: discover
     runs-on: ${{ inputs.platform }}
-    if: ${{ needs.discover.outputs.roles != '' && toJson(fromJson(needs.discover.outputs.roles)) != '[]' }}
+    if: ${{ needs.discover.outputs.role_scenarios != '' && toJson(fromJson(needs.discover.outputs.role_scenarios)) != '[]' }}
     strategy:
       matrix:
-        role: ${{ fromJSON(needs.discover.outputs.roles) }}
+        include: ${{ fromJSON(needs.discover.outputs.role_scenarios) }}
       fail-fast: false
     steps:
       - uses: actions/checkout@v6
@@ -179,11 +192,11 @@ jobs:
           python3 -m pip install --user ansible molecule-plugins[docker] molecule-plugins[podman] docker
           echo "${HOME}/.local/bin" >> $GITHUB_PATH
 
-      - name: Run molecule tests for role ${{ matrix.role }}
+      - name: Run molecule tests for role ${{ matrix.role }} scenario ${{ matrix.scenario }}
         run: |
           molecule --version
           cd roles/${{ matrix.role }}
-          molecule test --all --parallel
+          molecule test -s ${{ matrix.scenario }}
         env:
           PY_COLORS: '1'
           ANSIBLE_FORCE_COLOR: '1'
