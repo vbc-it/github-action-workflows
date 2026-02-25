@@ -1,0 +1,7 @@
+---
+- name: Create sample service marker
+  ansible.builtin.copy:
+    dest: /tmp/sample_service_config
+    content: |
+      service: example
+      enabled: true
