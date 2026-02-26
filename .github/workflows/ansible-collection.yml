@@ -163,14 +163,14 @@ jobs:
         run: |
           roles="${{ steps.transform.outputs.directories }}"
           echo "Roles to process: $roles"
-          
+
           # Build JSON array of role-scenario combinations
           role_scenarios_json=$(echo "$roles" | jq -r '.[]' | while read -r role; do
             molecule_dir="${{ inputs.collection-path }}/roles/$role/molecule"
-            
+
             if [ -d "$molecule_dir" ]; then
               echo "Checking scenarios in $molecule_dir" >&2
-              
+
               # Find all scenario directories
               # Using GNU find's -printf for efficiency (runs on ubuntu-latest with GNU coreutils)
               found_scenarios=false
@@ -182,16 +182,16 @@ jobs:
                   found_scenarios=true
                 fi
               done < <(find "$molecule_dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')
-              
+
               if [ "$found_scenarios" = false ]; then
                 echo "No scenarios found for role $role" >&2
               fi
             fi
           done | jq -s .)
-          
+
           # Output the result
           echo "role_scenarios=$role_scenarios_json" >> $GITHUB_OUTPUT
-          
+
           # Display summary
           count=$(echo "$role_scenarios_json" | jq '. | length')
           if [ "$count" -eq 0 ]; then
@@ -239,7 +239,7 @@ jobs:
         run: |
           molecule --version
           cd "${{ inputs.collection-path }}/roles/${{ matrix.role }}"
-          molecule test --scenario-name ${{ matrix.scenario }} --parallel
+          molecule test --scenario-name "${{ matrix.scenario }}" --parallel
         env:
           PY_COLORS: '1'
           ANSIBLE_FORCE_COLOR: '1'
