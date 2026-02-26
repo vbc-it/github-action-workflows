@@ -133,8 +133,8 @@ jobs:
           echo "DEBUG: all_roles=${{ steps.scope.outputs.all_roles }}"
           if [[ "${{ steps.scope.outputs.all_roles }}" == "true" ]]; then
             echo "DEBUG: Taking all_roles=true path"
-            folders="${{ steps.list-roles.outputs.role_folders }}"
-            echo "DEBUG: role_folders='$folders'"
+            read -r -a folders <<< "${{ steps.list-roles.outputs.role_folders }}"
+            echo "DEBUG: role_folders='${folders[*]}'"
           else
             echo "DEBUG: Taking all_roles=false path"
             folders=()
@@ -145,7 +145,7 @@ jobs:
             done
           fi
           echo "DEBUG: folders after if block='${folders[@]}'"
-          unique_folders=($(printf "%s\n" "${folders[@]}" | sort -u | tr '\n' ' '))
+          unique_folders=($(printf "%s\n" "${folders[@]}" | sed '/^$/d' | sort -u))
           echo "Found ${#unique_folders[@]} roles";
           echo "DEBUG: unique_folders='${unique_folders[@]}'"
           existing_folders=()
@@ -164,36 +164,18 @@ jobs:
              done
           echo "DEBUG: existing_folders array: ${existing_folders[@]}"
           echo "DEBUG: existing_folders count: ${#existing_folders[@]}"
-          echo "DEBUG: Checking jq availability"
-          which jq || echo "jq not found in PATH"
-          jq --version || echo "jq version check failed"
-          echo "DEBUG: About to create JSON with jq"
-          directories_json=$(jq --compact-output --null-input '$ARGS.positional' --args -- "${existing_folders[@]}")
+          directories_json=$(printf '%s\n' "${existing_folders[@]}" | sed '/^$/d' | jq -R -s -c 'split("\n") | map(select(length > 0))')
           echo "DEBUG: directories_json='$directories_json'"
           echo "directories=$directories_json" >> $GITHUB_OUTPUT
 
       - name: Discover scenarios for each role
         id: discover-scenarios
         run: |
-          roles="${{ steps.transform.outputs.directories }}"
-          echo "Roles to process: $roles"
-
-          # Validate that roles is valid JSON
-          if ! echo "$roles" | jq empty 2>/dev/null; then
-            echo "ERROR: roles output is not valid JSON: '$roles'"
-            echo "Attempting to parse as space-separated list..."
-            # Try to convert space-separated list to JSON array
-            if [ -n "$roles" ]; then
-              roles=$(echo "$roles" | tr ' ' '\n' | grep -v '^$' | jq -R -s -c 'split("\n") | map(select(length > 0))')
-              echo "Converted to JSON: $roles"
-            else
-              roles="[]"
-              echo "Using empty array"
-            fi
-          fi
+          roles_json='${{ steps.transform.outputs.directories }}'
+          echo "Roles to process: $roles_json"
 
           # Build JSON array of role-scenario combinations
-          role_scenarios_json=$(echo "$roles" | jq -r '.[]' | while read -r role; do
+          role_scenarios_json=$(echo "$roles_json" | jq -r '.[]' | while read -r role; do
             molecule_dir="${{ inputs.collection-path }}/roles/$role/molecule"
 
             if [ -d "$molecule_dir" ]; then
