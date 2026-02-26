@@ -1,7 +1,0 @@
----
-- name: Converge (second scenario)
-  hosts: all
-  tasks:
-    - name: Include sample_service role
-      ansible.builtin.include_role:
-        name: sample_service

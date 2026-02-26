@@ -1,0 +1,8 @@
+---
+- name: Create marker file if not present
+  ansible.builtin.file:
+    path: /tmp/role_installed
+    state: touch
+    mode: '0644'
+    modification_time: preserve
+    access_time: preserve
