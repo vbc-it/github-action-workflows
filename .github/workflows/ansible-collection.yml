@@ -130,9 +130,13 @@ jobs:
         id: transform
         continue-on-error: false
         run: |
+          echo "DEBUG: all_roles=${{ steps.scope.outputs.all_roles }}"
           if [[ "${{ steps.scope.outputs.all_roles }}" == "true" ]]; then
+            echo "DEBUG: Taking all_roles=true path"
             folders="${{ steps.list-roles.outputs.role_folders }}"
+            echo "DEBUG: role_folders='$folders'"
           else
+            echo "DEBUG: Taking all_roles=false path"
             folders=()
             for f in ${{ steps.filter.outputs.role_files }};
               do
@@ -140,8 +144,10 @@ jobs:
                folders+=($(basename "$(dirname "$f")"));
             done
           fi
+          echo "DEBUG: folders after if block='${folders[@]}'"
           unique_folders=($(printf "%s\n" "${folders[@]}" | sort -u | tr '\n' ' '))
           echo "Found ${#unique_folders[@]} roles";
+          echo "DEBUG: unique_folders='${unique_folders[@]}'"
           existing_folders=()
           echo "Checking if roles still exists ";
           for folder in ${unique_folders[*]};
