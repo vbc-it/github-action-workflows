@@ -174,15 +174,17 @@ jobs:
             
             if [ -d "$molecule_dir" ]; then
               # Find all scenario directories
-              scenarios=$(find "$molecule_dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')
-              
-              if [ -z "$scenarios" ]; then
-                echo "No scenarios found for role $role"
-              else
-                for scenario in $scenarios; do
+              # Using GNU find's -printf for efficiency (runs on ubuntu-latest with GNU coreutils)
+              while IFS= read -r scenario; do
+                if [ -n "$scenario" ]; then
                   echo "Found scenario: $role/$scenario"
                   role_scenarios+=("{\"role\":\"$role\",\"scenario\":\"$scenario\"}")
-                done
+                fi
+              done < <(find "$molecule_dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')
+              
+              # Check if any scenarios were found
+              if [ "$(find "$molecule_dir" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 0 ]; then
+                echo "No scenarios found for role $role"
               fi
             fi
           done
