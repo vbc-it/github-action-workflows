@@ -154,7 +154,7 @@ jobs:
               if [ -n "$scenario" ]; then
                 jq -n --arg role "$role" --arg scenario "$scenario" '{role: $role, scenario: $scenario}'
               fi
-            done < <(find "$molecule_dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')
+            done < <(find "$molecule_dir" -mindepth 1 -maxdepth 1 -type d -exec test -f '{}/molecule.yml' \; -printf '%f\n')
           done | jq -c -s .)
 
           # Output the result
