@@ -1,0 +1,15 @@
+name: test-self
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  ansible-collection:
+    uses: ./.github/workflows/ansible-collection.yml
+    with:
+      platform: ubuntu-latest
+      collection-path: tests/test_collection

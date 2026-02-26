@@ -1,0 +1,13 @@
+---
+- name: Verify
+  hosts: all
+  tasks:
+    - name: Check sample app marker
+      ansible.builtin.stat:
+        path: /tmp/sample_app_installed
+      register: sample_app_marker
+
+    - name: Assert sample app marker exists
+      ansible.builtin.assert:
+        that:
+          - sample_app_marker.stat.exists

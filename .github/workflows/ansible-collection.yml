@@ -8,6 +8,11 @@ on:
         required: true
         default: 'ubuntu-latest'
         type: string
+      collection-path:
+        description: 'Path to the Ansible collection root'
+        required: false
+        default: '.'
+        type: string
 
 concurrency:
   group: >-
@@ -100,7 +105,7 @@ jobs:
         id: list-roles
         if: steps.scope.outputs.all_roles == 'true'
         run: |
-          echo "role_folders=$(find roles/* -maxdepth 0 -type d | cut -d'/' -f2 | tr '\n' ' ')" >> $GITHUB_OUTPUT
+           echo "role_folders=$(find \"${{ inputs.collection-path }}\"/roles/* -maxdepth 0 -type d -exec basename {} \\; | tr '\n' ' ')" >> $GITHUB_OUTPUT
 
       - name: Find changeset
         if: steps.scope.outputs.all_roles == 'false'
@@ -111,7 +116,7 @@ jobs:
           list-files: shell
           filters: |
             role:
-              - roles/*/**
+              - ${{ inputs.collection-path }}/roles/*/**
 
       - name: Transform to directories
         id: transform
@@ -123,8 +128,8 @@ jobs:
             folders=()
             for f in ${{ steps.filter.outputs.role_files }};
               do
-                echo "Adding $(dirname $f) to folders";
-                folders+=($(dirname $f | cut -d'/' -f2));
+               echo "Adding $(dirname $f) to folders";
+               folders+=($(basename "$(dirname "$f")"));
             done
           fi
           unique_folders=($(printf "%s\n" "${folders[@]}" | sort -u | tr '\n' ' '))
@@ -134,15 +139,15 @@ jobs:
           for folder in ${unique_folders[*]};
             do
               echo "Checking if roles/$folder exists";
-              if [ -d "roles/$folder" ]; then
-                  if [ -d "roles/$folder/molecule" ]; then
-                    echo "roles/$folder has molecule tests";
-                    existing_folders+=("$folder")
-                  else
-                    echo "roles/$folder has no molecule directory, skipping";
-                  fi
-              fi
-            done
+               if [ -d "${{ inputs.collection-path }}/roles/$folder" ]; then
+                   if [ -d "${{ inputs.collection-path }}/roles/$folder/molecule" ]; then
+                     echo "${{ inputs.collection-path }}/roles/$folder has molecule tests";
+                     existing_folders+=("$folder")
+                   else
+                     echo "${{ inputs.collection-path }}/roles/$folder has no molecule directory, skipping";
+                   fi
+               fi
+             done
           echo "directories=$(jq --compact-output --null-input '$ARGS.positional' --args -- ${existing_folders[@]})" >> $GITHUB_OUTPUT
 
   molecule:
@@ -182,12 +187,12 @@ jobs:
       - name: Run molecule tests for role ${{ matrix.role }}
         run: |
           molecule --version
-          cd roles/${{ matrix.role }}
+          cd "${{ inputs.collection-path }}/roles/${{ matrix.role }}"
           molecule test --all --parallel
         env:
           PY_COLORS: '1'
           ANSIBLE_FORCE_COLOR: '1'
-          ANSIBLE_ROLES_PATH: "${GITHUB_WORKSPACE}/roles:~/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles"
+          ANSIBLE_ROLES_PATH: "${GITHUB_WORKSPACE}/${{ inputs.collection-path }}/roles:~/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles"
 
   check:  # This job does nothing and is only used for the branch protection
           # or multi-stage CI jobs, like making sure that all tests pass before
