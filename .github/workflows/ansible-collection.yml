@@ -106,7 +106,7 @@ jobs:
         id: list-roles
         if: steps.scope.outputs.all_roles == 'true'
         run: |
-           echo "role_folders=$(find \"${{ inputs.collection-path }}\"/roles/* -maxdepth 0 -type d -exec basename {} \\; | tr '\n' ' ')" >> $GITHUB_OUTPUT
+          echo "role_folders=$(find ${{ inputs.collection-path }}/roles/* -maxdepth 0 -type d -exec basename {} \; | tr '\n' ' ')" >> $GITHUB_OUTPUT
 
       - name: Find changeset
         if: steps.scope.outputs.all_roles == 'false'
