@@ -105,7 +105,7 @@ jobs:
         id: list-roles
         if: steps.scope.outputs.all_roles == 'true'
         run: |
-           echo "role_folders=$(find \"${{ inputs.collection-path }}\"/roles/* -maxdepth 0 -type d | rev | cut -d'/' -f1 | rev | tr '\n' ' ')" >> $GITHUB_OUTPUT
+           echo "role_folders=$(find \"${{ inputs.collection-path }}\"/roles/* -maxdepth 0 -type d -exec basename {} \\; | tr '\n' ' ')" >> $GITHUB_OUTPUT
 
       - name: Find changeset
         if: steps.scope.outputs.all_roles == 'false'
@@ -129,7 +129,7 @@ jobs:
             for f in ${{ steps.filter.outputs.role_files }};
               do
                echo "Adding $(dirname $f) to folders";
-               folders+=($(dirname $f | rev | cut -d'/' -f2 | rev));
+               folders+=($(basename "$(dirname "$f")"));
             done
           fi
           unique_folders=($(printf "%s\n" "${folders[@]}" | sort -u | tr '\n' ' '))
