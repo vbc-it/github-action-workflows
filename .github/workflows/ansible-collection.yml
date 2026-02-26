@@ -92,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: sanity
     outputs:
-      roles: ${{ steps.transform.outputs.directories }}
+      role_scenarios: ${{ steps.discover-scenarios.outputs.role_scenarios }}
     steps:
       - uses: actions/checkout@v6
 
@@ -126,45 +126,56 @@ jobs:
             role:
               - ${{ inputs.collection-path }}/roles/*/**
 
-      - name: Transform to directories
-        id: transform
-        continue-on-error: false
+      - name: Discover scenarios for each role
+        id: discover-scenarios
         run: |
+          folders=()
           if [[ "${{ steps.scope.outputs.all_roles }}" == "true" ]]; then
-            folders="${{ steps.list-roles.outputs.role_folders }}"
+            read -r -a folders <<< "${{ steps.list-roles.outputs.role_folders }}"
           else
-            folders=()
-            for f in ${{ steps.filter.outputs.role_files }};
-              do
-               echo "Adding $(dirname $f) to folders";
-               folders+=($(basename "$(dirname "$f")"));
+            for f in ${{ steps.filter.outputs.role_files }}; do
+              folders+=("$(basename "$(dirname "$f")")")
             done
           fi
-          unique_folders=($(printf "%s\n" "${folders[@]}" | sort -u | tr '\n' ' '))
-          echo "Found ${#unique_folders[@]} roles";
-          existing_folders=()
-          echo "Checking if roles still exists ";
-          for folder in ${unique_folders[*]};
-            do
-              echo "Checking if roles/$folder exists";
-               if [ -d "${{ inputs.collection-path }}/roles/$folder" ]; then
-                   if [ -d "${{ inputs.collection-path }}/roles/$folder/molecule" ]; then
-                     echo "${{ inputs.collection-path }}/roles/$folder has molecule tests";
-                     existing_folders+=("$folder")
-                   else
-                     echo "${{ inputs.collection-path }}/roles/$folder has no molecule directory, skipping";
-                   fi
-               fi
-             done
-          echo "directories=$(jq --compact-output --null-input '$ARGS.positional' --args -- ${existing_folders[@]})" >> $GITHUB_OUTPUT
+
+          unique_folders=($(printf "%s\n" "${folders[@]}" | sed '/^$/d' | sort -u))
+          echo "Found ${#unique_folders[@]} changed/selected role(s)"
+
+          # Build JSON array of role-scenario combinations
+          role_scenarios_json=$(for role in "${unique_folders[@]}"; do
+            molecule_dir="${{ inputs.collection-path }}/roles/$role/molecule"
+
+            if [ ! -d "$molecule_dir" ]; then
+              echo "Skipping $role: no molecule directory" >&2
+              continue
+            fi
+
+            while IFS= read -r scenario; do
+              if [ -n "$scenario" ]; then
+                jq -n --arg role "$role" --arg scenario "$scenario" '{role: $role, scenario: $scenario}'
+              fi
+            done < <(find "$molecule_dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')
+          done | jq -c -s .)
+
+          # Output the result
+          printf 'role_scenarios=%s\n' "$role_scenarios_json" >> "$GITHUB_OUTPUT"
+
+          # Display summary
+          count=$(echo "$role_scenarios_json" | jq '. | length')
+          if [ "$count" -eq 0 ]; then
+            echo "No role-scenario combinations found"
+          else
+            echo "Found $count role-scenario combination(s):"
+            echo "$role_scenarios_json" | jq -r '.[] | "  - \(.role)/\(.scenario)"'
+          fi
 
   molecule:
     needs: discover
     runs-on: ${{ inputs.platform }}
-    if: ${{ needs.discover.outputs.roles != '' && toJson(fromJson(needs.discover.outputs.roles)) != '[]' }}
+    if: ${{ needs.discover.outputs.role_scenarios != '' && toJson(fromJson(needs.discover.outputs.role_scenarios)) != '[]' }}
     strategy:
       matrix:
-        role: ${{ fromJSON(needs.discover.outputs.roles) }}
+        include: ${{ fromJSON(needs.discover.outputs.role_scenarios) }}
       fail-fast: false
     steps:
       - uses: actions/checkout@v6
@@ -192,11 +203,11 @@ jobs:
           python3 -m pip install --user ansible molecule-plugins[docker] molecule-plugins[podman] docker
           echo "${HOME}/.local/bin" >> $GITHUB_PATH
 
-      - name: Run molecule tests for role ${{ matrix.role }}
+      - name: Run molecule tests for role ${{ matrix.role }} scenario ${{ matrix.scenario }}
         run: |
           molecule --version
           cd "${{ inputs.collection-path }}/roles/${{ matrix.role }}"
-          molecule test --all --parallel
+          molecule test --scenario-name "${{ matrix.scenario }}" --parallel
         env:
           PY_COLORS: '1'
           ANSIBLE_FORCE_COLOR: '1'
