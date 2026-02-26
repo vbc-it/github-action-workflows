@@ -92,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: sanity
     outputs:
-      roles: ${{ steps.transform.outputs.directories }}
+      role_scenarios: ${{ steps.discover-scenarios.outputs.role_scenarios }}
     steps:
       - uses: actions/checkout@v6
 
@@ -158,13 +158,52 @@ jobs:
              done
           echo "directories=$(jq --compact-output --null-input '$ARGS.positional' --args -- ${existing_folders[@]})" >> $GITHUB_OUTPUT
 
+      - name: Discover scenarios for each role
+        id: discover-scenarios
+        run: |
+          roles="${{ steps.transform.outputs.directories }}"
+          echo "Roles to process: $roles"
+          
+          # Initialize empty array for role-scenario combinations
+          role_scenarios=()
+          
+          # Parse the JSON array of roles
+          for role in $(echo "$roles" | jq -r '.[]'); do
+            molecule_dir="${{ inputs.collection-path }}/roles/$role/molecule"
+            echo "Checking scenarios in $molecule_dir"
+            
+            if [ -d "$molecule_dir" ]; then
+              # Find all scenario directories
+              scenarios=$(find "$molecule_dir" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
+              
+              if [ -z "$scenarios" ]; then
+                echo "No scenarios found for role $role"
+              else
+                for scenario in $scenarios; do
+                  echo "Found scenario: $role/$scenario"
+                  role_scenarios+=("{\"role\":\"$role\",\"scenario\":\"$scenario\"}")
+                done
+              fi
+            fi
+          done
+          
+          # Convert to JSON array
+          if [ ${#role_scenarios[@]} -eq 0 ]; then
+            echo "role_scenarios=[]" >> $GITHUB_OUTPUT
+          else
+            printf -v joined '%s,' "${role_scenarios[@]}"
+            echo "role_scenarios=[${joined%,}]" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "Role-scenario combinations: [${joined%,}]"
+
   molecule:
     needs: discover
     runs-on: ${{ inputs.platform }}
-    if: ${{ needs.discover.outputs.roles != '' && toJson(fromJson(needs.discover.outputs.roles)) != '[]' }}
+    if: ${{ needs.discover.outputs.role_scenarios != '' && toJson(fromJson(needs.discover.outputs.role_scenarios)) != '[]' }}
     strategy:
       matrix:
-        role: ${{ fromJSON(needs.discover.outputs.roles) }}
+        include: ${{ fromJSON(needs.discover.outputs.role_scenarios) }}
       fail-fast: false
     steps:
       - uses: actions/checkout@v6
@@ -192,11 +231,11 @@ jobs:
           python3 -m pip install --user ansible molecule-plugins[docker] molecule-plugins[podman] docker
           echo "${HOME}/.local/bin" >> $GITHUB_PATH
 
-      - name: Run molecule tests for role ${{ matrix.role }}
+      - name: Run molecule tests for role ${{ matrix.role }} scenario ${{ matrix.scenario }}
         run: |
           molecule --version
           cd "${{ inputs.collection-path }}/roles/${{ matrix.role }}"
-          molecule test --all --parallel
+          molecule test --scenario-name ${{ matrix.scenario }} --parallel
         env:
           PY_COLORS: '1'
           ANSIBLE_FORCE_COLOR: '1'
