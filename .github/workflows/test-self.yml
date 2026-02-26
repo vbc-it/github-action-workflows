@@ -8,9 +8,26 @@ on:
       - master
 
 jobs:
+  detect-workflow-change:
+    runs-on: ubuntu-latest
+    outputs:
+      force_all_roles: ${{ steps.filter.outputs.workflow }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          base: ${{ github.event.before || github.event.pull_request.base.sha || github.sha }}
+          filters: |
+            workflow:
+              - .github/workflows/ansible-collection.yml
+
   ansible-collection:
+    needs: detect-workflow-change
     uses: ./.github/workflows/ansible-collection.yml
     with:
       platform: ubuntu-latest
       collection-path: tests/test_collection
-      force_all_roles: ${{ contains(toJson(github.event.commits), '.github/workflows/ansible-collection.yml') }}
+      force_all_roles: ${{ needs.detect-workflow-change.outputs.force_all_roles == 'true' }}
