@@ -177,6 +177,20 @@ jobs:
         run: |
           roles="${{ steps.transform.outputs.directories }}"
           echo "Roles to process: $roles"
+          
+          # Validate that roles is valid JSON
+          if ! echo "$roles" | jq empty 2>/dev/null; then
+            echo "ERROR: roles output is not valid JSON: '$roles'"
+            echo "Attempting to parse as space-separated list..."
+            # Try to convert space-separated list to JSON array
+            if [ -n "$roles" ]; then
+              roles=$(echo "$roles" | tr ' ' '\n' | grep -v '^$' | jq -R -s -c 'split("\n") | map(select(length > 0))')
+              echo "Converted to JSON: $roles"
+            else
+              roles="[]"
+              echo "Using empty array"
+            fi
+          fi
 
           # Build JSON array of role-scenario combinations
           role_scenarios_json=$(echo "$roles" | jq -r '.[]' | while read -r role; do
