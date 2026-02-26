@@ -156,7 +156,12 @@ jobs:
                    fi
                fi
              done
-          echo "directories=$(jq --compact-output --null-input '$ARGS.positional' --args -- ${existing_folders[@]})" >> $GITHUB_OUTPUT
+          echo "DEBUG: existing_folders array: ${existing_folders[@]}"
+          echo "DEBUG: existing_folders count: ${#existing_folders[@]}"
+          echo "DEBUG: About to create JSON with jq"
+          directories_json=$(jq --compact-output --null-input '$ARGS.positional' --args -- "${existing_folders[@]}")
+          echo "DEBUG: directories_json='$directories_json'"
+          echo "directories=$directories_json" >> $GITHUB_OUTPUT
 
       - name: Discover scenarios for each role
         id: discover-scenarios
