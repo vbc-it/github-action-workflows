@@ -13,3 +13,4 @@ jobs:
     with:
       platform: ubuntu-latest
       collection-path: tests/test_collection
+      force_all_roles: ${{ contains(toJson(github.event.commits), '.github/workflows/ansible-collection.yml') }}

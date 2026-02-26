@@ -13,6 +13,11 @@ on:
         required: false
         default: '.'
         type: string
+      force_all_roles:
+        description: 'Set to true to run all roles regardless of the changeset'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: >-
@@ -92,14 +97,16 @@ jobs:
       - uses: actions/checkout@v6
 
       # Add a step to detect the event type
-      - name: Set test scope
-        id: scope
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" || "${{ github.event_name }}" == "schedule" ]]; then
-            echo "all_roles=true" >> $GITHUB_OUTPUT
-          else
-            echo "all_roles=false" >> $GITHUB_OUTPUT
-          fi
+       - name: Set test scope
+         id: scope
+         run: |
+           if [[ "${{ inputs.force_all_roles }}" == "true" ]]; then
+             echo "all_roles=true" >> $GITHUB_OUTPUT
+           elif [[ "${{ github.event_name }}" == "workflow_dispatch" || "${{ github.event_name }}" == "schedule" ]]; then
+             echo "all_roles=true" >> $GITHUB_OUTPUT
+           else
+             echo "all_roles=false" >> $GITHUB_OUTPUT
+           fi
 
       # Add a step to list all roles when running full tests
       - name: List all roles
