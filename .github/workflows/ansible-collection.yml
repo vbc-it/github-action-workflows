@@ -164,6 +164,9 @@ jobs:
              done
           echo "DEBUG: existing_folders array: ${existing_folders[@]}"
           echo "DEBUG: existing_folders count: ${#existing_folders[@]}"
+          echo "DEBUG: Checking jq availability"
+          which jq || echo "jq not found in PATH"
+          jq --version || echo "jq version check failed"
           echo "DEBUG: About to create JSON with jq"
           directories_json=$(jq --compact-output --null-input '$ARGS.positional' --args -- "${existing_folders[@]}")
           echo "DEBUG: directories_json='$directories_json'"
