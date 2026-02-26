@@ -12,3 +12,4 @@ jobs:
     uses: ./.github/workflows/ansible-collection.yml
     with:
       platform: ubuntu-latest
+      collection-path: tests/test_collection
