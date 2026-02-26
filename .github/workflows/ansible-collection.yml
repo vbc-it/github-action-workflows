@@ -177,7 +177,7 @@ jobs:
         run: |
           roles="${{ steps.transform.outputs.directories }}"
           echo "Roles to process: $roles"
-          
+
           # Validate that roles is valid JSON
           if ! echo "$roles" | jq empty 2>/dev/null; then
             echo "ERROR: roles output is not valid JSON: '$roles'"
