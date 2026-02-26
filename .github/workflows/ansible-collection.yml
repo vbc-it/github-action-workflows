@@ -164,39 +164,41 @@ jobs:
           roles="${{ steps.transform.outputs.directories }}"
           echo "Roles to process: $roles"
           
-          # Initialize empty array for role-scenario combinations
-          role_scenarios=()
-          
-          # Parse the JSON array of roles
-          for role in $(echo "$roles" | jq -r '.[]'); do
+          # Build JSON array of role-scenario combinations
+          role_scenarios_json=$(echo "$roles" | jq -r '.[]' | while read -r role; do
             molecule_dir="${{ inputs.collection-path }}/roles/$role/molecule"
-            echo "Checking scenarios in $molecule_dir"
             
             if [ -d "$molecule_dir" ]; then
+              echo "Checking scenarios in $molecule_dir" >&2
+              
               # Find all scenario directories
               # Using GNU find's -printf for efficiency (runs on ubuntu-latest with GNU coreutils)
+              found_scenarios=false
               while IFS= read -r scenario; do
                 if [ -n "$scenario" ]; then
-                  echo "Found scenario: $role/$scenario"
-                  role_scenarios+=("{\"role\":\"$role\",\"scenario\":\"$scenario\"}")
+                  echo "Found scenario: $role/$scenario" >&2
+                  # Use jq to safely construct JSON object
+                  jq -n --arg role "$role" --arg scenario "$scenario" '{role: $role, scenario: $scenario}'
+                  found_scenarios=true
                 fi
               done < <(find "$molecule_dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')
               
-              # Check if any scenarios were found
-              if [ "$(find "$molecule_dir" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 0 ]; then
-                echo "No scenarios found for role $role"
+              if [ "$found_scenarios" = false ]; then
+                echo "No scenarios found for role $role" >&2
               fi
             fi
-          done
+          done | jq -s .)
           
-          # Convert to JSON array
-          if [ ${#role_scenarios[@]} -eq 0 ]; then
-            echo "role_scenarios=[]" >> $GITHUB_OUTPUT
+          # Output the result
+          echo "role_scenarios=$role_scenarios_json" >> $GITHUB_OUTPUT
+          
+          # Display summary
+          count=$(echo "$role_scenarios_json" | jq '. | length')
+          if [ "$count" -eq 0 ]; then
             echo "No role-scenario combinations found"
           else
-            printf -v joined '%s,' "${role_scenarios[@]}"
-            echo "role_scenarios=[${joined%,}]" >> $GITHUB_OUTPUT
-            echo "Role-scenario combinations: [${joined%,}]"
+            echo "Found $count role-scenario combination(s):"
+            echo "$role_scenarios_json" | jq -r '.[] | "  - \(.role)/\(.scenario)"'
           fi
 
   molecule:
