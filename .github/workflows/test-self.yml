@@ -5,44 +5,15 @@ on:
   push:
     branches:
       - main
-      - master
   pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  detect-workflow-change:
-    runs-on: ubuntu-latest
-    outputs:
-      force_all_roles: ${{ steps.resolve.outputs.force_all_roles }}
-    steps:
-      - id: default
-        run: echo "force_all_roles=false" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v6
-        if: github.event_name == 'push'
-        with:
-          fetch-depth: 0
-      - id: filter
-        if: github.event_name == 'push'
-        uses: dorny/paths-filter@v3
-        with:
-          base: ${{ github.event.before }}
-          filters: |
-            workflow:
-              - .github/workflows/ansible-collection.yml
-      - id: resolve
-        run: |
-          value="${{ steps.default.outputs.force_all_roles }}"
-          if [ "${{ github.event_name }}" = "push" ]; then
-            value="${{ steps.filter.outputs.workflow }}"
-          fi
-          echo "force_all_roles=$value" >> "$GITHUB_OUTPUT"
-
   ansible-collection:
-    needs: detect-workflow-change
     uses: ./.github/workflows/ansible-collection.yml
     with:
       platform: ubuntu-latest
       collection-path: tests/test_collection
-      force_all_roles: ${{ needs.detect-workflow-change.outputs.force_all_roles == 'true' }}
+      force_all_roles: true
