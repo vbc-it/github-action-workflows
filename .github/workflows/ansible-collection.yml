@@ -174,7 +174,7 @@ jobs:
             
             if [ -d "$molecule_dir" ]; then
               # Find all scenario directories
-              scenarios=$(find "$molecule_dir" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
+              scenarios=$(find "$molecule_dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')
               
               if [ -z "$scenarios" ]; then
                 echo "No scenarios found for role $role"
@@ -190,12 +190,12 @@ jobs:
           # Convert to JSON array
           if [ ${#role_scenarios[@]} -eq 0 ]; then
             echo "role_scenarios=[]" >> $GITHUB_OUTPUT
+            echo "No role-scenario combinations found"
           else
             printf -v joined '%s,' "${role_scenarios[@]}"
             echo "role_scenarios=[${joined%,}]" >> $GITHUB_OUTPUT
+            echo "Role-scenario combinations: [${joined%,}]"
           fi
-          
-          echo "Role-scenario combinations: [${joined%,}]"
 
   molecule:
     needs: discover
