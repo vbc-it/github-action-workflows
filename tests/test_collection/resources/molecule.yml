@@ -12,6 +12,7 @@ platforms:
   - name: instance_alma10
     image: quay.io/almalinuxorg/10-base
     pre_build_image: true
+    # change
 
 provisioner:
   name: ansible
