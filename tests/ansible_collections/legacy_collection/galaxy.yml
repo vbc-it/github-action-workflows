@@ -10,5 +10,5 @@ license:
   - MIT
 tags:
   - testing
-  - github-actions
+  - linux
 repository: https://github.com/vbc-it/github-action-workflows
