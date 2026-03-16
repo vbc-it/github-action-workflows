@@ -13,5 +13,5 @@ jobs:
     uses: ./.github/workflows/ansible-collection.yml
     with:
       platform: ubuntu-latest
-      collection-path: tests/test_collection
+      collection-path: tests/ansible_collections/legacy_collection
       force_all_roles: true
