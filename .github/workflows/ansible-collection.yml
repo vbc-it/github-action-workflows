@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       platform:
-        description: 'The platform to run sanity tests on'
+        description: 'The platform to run molecule tests on'
         required: true
         default: 'ubuntu-latest'
         type: string
@@ -37,12 +37,12 @@ jobs:
           python-version: '3.12.12'
       - uses: pre-commit/action@v3.0.1
 
-###
-# Sanity tests (REQUIRED)
-#
-# https://docs.ansible.com/ansible/latest/dev_guide/testing_sanity.html
+  ansible-lint:
+    needs: pre-commit
+    uses: ansible/ansible-content-actions/.github/workflows/ansible_lint.yaml@main
 
   sanity:
+    needs: ansible-lint
     name: Sanity (Ⓐ${{ matrix.ansible }})
     strategy:
       matrix:
