@@ -186,15 +186,14 @@ jobs:
         uses: astral-sh/setup-uv@v6
 
       - name: Sync dependencies with uv
-        run: |
-          cd "${{ inputs.collection-path }}"
-          uv sync --dev
+        run: uv sync --dev
+        working-directory: ${{ inputs.collection-path }}
 
       - name: Run molecule tests for role ${{ matrix.role }} scenario ${{ matrix.scenario }}
         run: |
           uv run molecule --version
-          cd "${{ inputs.collection-path }}/roles/${{ matrix.role }}"
           uv run molecule test --scenario-name "${{ matrix.scenario }}" --parallel
+        working-directory: "${{ inputs.collection-path }}/roles/${{ matrix.role }}"
         env:
           PY_COLORS: '1'
           ANSIBLE_FORCE_COLOR: '1'
