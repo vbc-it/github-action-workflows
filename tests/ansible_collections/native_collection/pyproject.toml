@@ -1,7 +1,8 @@
-[tool.black]
-line-length = 100
-
-[tool.pytest.ini_options]
-addopts = ["-vvv", "-n", "2", "--log-level", "WARNING", "--color", "yes"]
-filterwarnings = ["ignore:AnsibleCollectionFinder has already been configured"]
-testpaths = ["tests"]
+[project]
+name = "github-action-workflows"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "ansible-core>=2.19.7",
+    "molecule>=26.3.0",
+]

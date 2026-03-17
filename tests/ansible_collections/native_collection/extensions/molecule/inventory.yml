@@ -1,0 +1,15 @@
+---
+all:
+  children:
+    molecule:
+      hosts:
+        almalinux10:
+          ansible_connection: containers.podman.podman
+          container_image: quay.io/almalinuxorg/10-base
+          container_command: sleep 1d
+          container_privileged: false
+        almalinux9:
+          ansible_connection: containers.podman.podman
+          container_image: quay.io/almalinuxorg/9-base
+          container_command: sleep 1d
+          container_privileged: false

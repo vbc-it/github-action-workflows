@@ -1,0 +1,10 @@
+---
+- name: Converge
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: "Include the role dynamically"
+      ansible.builtin.include_role:
+        name: "role1"
+      vars:
+        role1_suffix: "_role1"
