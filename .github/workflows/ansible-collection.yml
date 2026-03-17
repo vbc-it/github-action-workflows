@@ -41,7 +41,7 @@ jobs:
     needs: pre-commit
     uses: ansible/ansible-content-actions/.github/workflows/ansible_lint.yaml@main
     with:
-      working_directory: ${{ github.workspace }}/${{ inputs.collection-path }}
+      working_directory: ${{ inputs.collection-path }}
 
   sanity:
     needs: ansible-lint
