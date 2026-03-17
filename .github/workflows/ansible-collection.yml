@@ -98,6 +98,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Sync dependencies with uv
+        run: uv sync --dev
+        working-directory: ${{ inputs.collection-path }}
+
       # Add a step to detect the event type
       - name: Set test scope
         id: scope
@@ -145,21 +152,93 @@ jobs:
           unique_folders=($(printf "%s\n" "${folders[@]}" | sed '/^$/d' | sort -u))
           echo "Found ${#unique_folders[@]} changed/selected role(s)"
 
-          # Build JSON array of role-scenario combinations
-          role_scenarios_json=$(for role in "${unique_folders[@]}"; do
-            molecule_dir="${{ inputs.collection-path }}/roles/$role/molecule"
+          role_scenarios_json='[]'
+          json_items=""
 
-            if [ ! -d "$molecule_dir" ]; then
-              echo "Skipping $role: no molecule directory" >&2
+          # Legacy collection: discover scenarios by running Molecule inside each selected role.
+          for role in "${unique_folders[@]}"; do
+            role_path="${{ inputs.collection-path }}/roles/$role"
+            if [[ ! -d "$role_path/molecule" ]]; then
               continue
             fi
 
-            while IFS= read -r scenario; do
-              if [ -n "$scenario" ]; then
-                jq -n --arg role "$role" --arg scenario "$scenario" '{role: $role, scenario: $scenario}'
+            set +e
+            legacy_output=$(cd "$role_path" && uv run molecule list -f yaml 2>&1)
+            legacy_rc=$?
+            set -e
+
+            if [[ "$legacy_rc" -ne 0 ]]; then
+              if echo "$legacy_output" | grep -q "glob failed"; then
+                continue
+              else
+                echo "$legacy_output" >&2
+                exit "$legacy_rc"
               fi
-            done < <(find "$molecule_dir" -mindepth 1 -maxdepth 1 -type d -exec test -f '{}/molecule.yml' \; -printf '%f\n')
-          done | jq -c -s .)
+            fi
+
+            mapfile -t legacy_scenarios < <(
+              echo "$legacy_output" \
+                | sed -nE "s/^[[:space:]]*Scenario Name:[[:space:]]*'?(.*)'?$/\1/p" \
+                | sed '/^$/d' \
+                | sort -u
+            )
+
+            for scenario_name in "${legacy_scenarios[@]}"; do
+              if [[ "$scenario_name" == "$role/"* ]]; then
+                scenario_name="${scenario_name#*/}"
+              fi
+
+              scenario_name="$(printf '%s' "$scenario_name" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+              if [[ -z "$scenario_name" ]]; then
+                continue
+              fi
+
+              json_items+="$(jq -c -n --arg role "$role" --arg scenario "$scenario_name" '{role: $role, scenario: $scenario}')"$'\n'
+            done
+          done
+
+          # Native collection: discover scenarios from collection root.
+          if [[ -d "${{ inputs.collection-path }}/extensions/molecule" ]]; then
+            set +e
+            native_output=$(cd "${{ inputs.collection-path }}" && uv run molecule list -f yaml 2>&1)
+            native_rc=$?
+            set -e
+
+            if [[ "$native_rc" -ne 0 ]]; then
+              if ! echo "$native_output" | grep -q "glob failed"; then
+                echo "$native_output" >&2
+                exit "$native_rc"
+              fi
+            else
+              mapfile -t native_scenarios < <(
+                echo "$native_output" \
+                  | sed -nE "s/^[[:space:]]*Scenario Name:[[:space:]]*'?(.*)'?$/\1/p" \
+                  | sed '/^$/d' \
+                  | sort -u
+              )
+
+              for full_scenario in "${native_scenarios[@]}"; do
+                if [[ "$full_scenario" == */* ]]; then
+                  role="${full_scenario%%/*}"
+                  scenario="${full_scenario#*/}"
+                else
+                  role="$full_scenario"
+                  scenario="default"
+                fi
+
+                # Keep only role scenarios that are part of the selected/changed roles.
+                if ! printf "%s\n" "${unique_folders[@]}" | grep -Fxq "$role"; then
+                  continue
+                fi
+
+                json_items+="$(jq -c -n --arg role "$role" --arg scenario "$scenario" '{role: $role, scenario: $scenario}')"$'\n'
+              done
+            fi
+          fi
+
+          if [[ -n "$json_items" ]]; then
+            role_scenarios_json=$(printf "%s" "$json_items" | jq -c -s 'unique_by([.role, .scenario])')
+          fi
 
           # Output the result
           printf 'role_scenarios=%s\n' "$role_scenarios_json" >> "$GITHUB_OUTPUT"
