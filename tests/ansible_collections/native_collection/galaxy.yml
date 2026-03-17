@@ -11,4 +11,6 @@ license:
 tags:
   - testing
   - linux
+dependencies:
+  'containers.podman': '>=1.0.0'
 repository: https://github.com/vbc-it/github-action-workflows
