@@ -19,12 +19,6 @@ on:
         default: false
         type: boolean
 
-concurrency:
-  group: >-
-    ${{ github.workflow }}-${{
-      github.event.pull_request.number || github.sha
-    }}
-  cancel-in-progress: true
 
 jobs:
 
@@ -193,7 +187,12 @@ jobs:
                 continue
               fi
 
-              json_items+="$(jq -c -n --arg role "$role" --arg scenario "$scenario_name" '{role: $role, scenario: $scenario}')"$'\n'
+              json_items+="$(jq -c -n \
+                --arg role "$role" \
+                --arg scenario "$scenario_name" \
+                --argjson is_native false \
+                '{role: $role, scenario: $scenario, is_native: $is_native}'
+              )"$'\n'
             done
           done
 
@@ -218,12 +217,24 @@ jobs:
               )
 
               for full_scenario in "${native_scenarios[@]}"; do
+                full_scenario="$(printf '%s' "$full_scenario" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+                if [[ -z "$full_scenario" || "$full_scenario" == "default" ]]; then
+                  continue
+                fi
+
                 if [[ "$full_scenario" == */* ]]; then
                   role="${full_scenario%%/*}"
-                  scenario="${full_scenario#*/}"
                 else
                   role="$full_scenario"
-                  scenario="default"
+                fi
+
+                # Keep native scenario names exactly as reported by molecule list.
+                scenario="$full_scenario"
+
+                role="$(printf '%s' "$role" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+                scenario="$(printf '%s' "$scenario" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+                if [[ -z "$role" || -z "$scenario" ]]; then
+                  continue
                 fi
 
                 # Keep only role scenarios that are part of the selected/changed roles.
@@ -231,13 +242,18 @@ jobs:
                   continue
                 fi
 
-                json_items+="$(jq -c -n --arg role "$role" --arg scenario "$scenario" '{role: $role, scenario: $scenario}')"$'\n'
+                json_items+="$(jq -c -n \
+                  --arg role "$role" \
+                  --arg scenario "$scenario" \
+                  --argjson is_native true \
+                  '{role: $role, scenario: $scenario, is_native: $is_native}'
+                )"$'\n'
               done
             fi
           fi
 
           if [[ -n "$json_items" ]]; then
-            role_scenarios_json=$(printf "%s" "$json_items" | jq -c -s 'unique_by([.role, .scenario])')
+            role_scenarios_json=$(printf "%s" "$json_items" | jq -c -s 'unique_by([.role, .scenario, .is_native])')
           fi
 
           # Output the result
@@ -249,7 +265,7 @@ jobs:
             echo "No role-scenario combinations found"
           else
             echo "Found $count role-scenario combination(s):"
-            echo "$role_scenarios_json" | jq -r '.[] | "  - \(.role)/\(.scenario)"'
+            echo "$role_scenarios_json" | jq -r '.[] | "  - " + (if .is_native then .scenario else (.role + "/" + .scenario) end) + " [native=\(.is_native)]"'
           fi
 
   molecule:
@@ -273,8 +289,10 @@ jobs:
       - name: Run molecule tests for role ${{ matrix.role }} scenario ${{ matrix.scenario }}
         run: |
           uv run molecule --version
+          # required because with shared_state dependency is not executed before create scenario, but create needs dependencies to be installed
+          uv run molecule dependency
           uv run molecule test --scenario-name "${{ matrix.scenario }}" --parallel
-        working-directory: "${{ inputs.collection-path }}/roles/${{ matrix.role }}"
+        working-directory: ${{ matrix.is_native && inputs.collection-path || format('{0}/roles/{1}', inputs.collection-path, matrix.role) }}
         env:
           PY_COLORS: '1'
           ANSIBLE_FORCE_COLOR: '1'

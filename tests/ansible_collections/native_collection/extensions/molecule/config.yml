@@ -7,14 +7,6 @@ ansible:
   env:
     ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/roles"
 
-scenario:
-  test_sequence:
-    - prepare
-    - converge
-    - verify
-    - idempotence
-    - verify
-    - cleanup
 
 dependency:
   name: galaxy

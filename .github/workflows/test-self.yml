@@ -9,9 +9,16 @@ permissions:
   contents: read
 
 jobs:
-  ansible-collection:
+  ansible-collection-legacy:
     uses: ./.github/workflows/ansible-collection.yml
     with:
       platform: ubuntu-latest
       collection-path: tests/ansible_collections/legacy_collection
+      force_all_roles: true
+
+  ansible-collection-native:
+    uses: ./.github/workflows/ansible-collection.yml
+    with:
+      platform: ubuntu-latest
+      collection-path: tests/ansible_collections/native_collection
       force_all_roles: true

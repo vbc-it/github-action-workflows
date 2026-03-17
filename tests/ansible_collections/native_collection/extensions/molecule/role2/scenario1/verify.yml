@@ -4,7 +4,7 @@
   tasks:
     - name: Check role_installed marker
       ansible.builtin.stat:
-        path: "/tmp/_installed_role1"
+        path: "/tmp/_installed_role2_scenario1"
       register: role_installed_marker
 
     - name: Assert role_installed marker exists
