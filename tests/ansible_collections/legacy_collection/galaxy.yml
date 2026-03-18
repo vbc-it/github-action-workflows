@@ -1,0 +1,16 @@
+---
+namespace: vbc
+name: legacy_collection
+version: 0.0.1
+readme: README.md
+authors:
+  - GitHub Action Workflows
+description: Test collection used to validate the reusable ansible-collection workflow.
+license:
+  - MIT
+tags:
+  - testing
+  - linux
+dependencies:
+  'containers.podman': '>=1.0.0'
+repository: https://github.com/vbc-it/github-action-workflows

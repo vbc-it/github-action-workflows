@@ -1,0 +1,12 @@
+2026-03-17 10:08:53,807 DEBUG 'ansible_creator.cli.run' parsed args {'subcommand': 'add', 'type': 'resource', 'resource_type': 'role', 'role_name': 'role1', 'path': './', 'overwrite': False, 'no_overwrite': False}
+2026-03-17 10:08:53,807 DEBUG 'ansible_creator.cli.run' starting requested action 'add'
+2026-03-17 10:08:53,818 DEBUG 'ansible_creator.cli.run' found action class <class 'ansible_creator.subcommands.add.Add'>
+2026-03-17 10:08:53,819 DEBUG 'ansible_creator.add.run' final collection path set to .
+2026-03-17 10:08:53,819 DEBUG 'ansible_creator.add._resource_scaffold' Started adding role to destination
+2026-03-17 10:08:53,819 ERROR 'ansible_creator.cli.run' The path . is not a valid Ansible collection path. Please provide the root path of a valid ansible collection.
+2026-03-17 10:09:25,092 DEBUG 'ansible_creator.cli.run' parsed args {'subcommand': 'add', 'type': 'resource', 'resource_type': 'role', 'role_name': 'role1', 'path': './', 'overwrite': False, 'no_overwrite': False}
+2026-03-17 10:09:25,092 DEBUG 'ansible_creator.cli.run' starting requested action 'add'
+2026-03-17 10:09:25,104 DEBUG 'ansible_creator.cli.run' found action class <class 'ansible_creator.subcommands.add.Add'>
+2026-03-17 10:09:25,104 DEBUG 'ansible_creator.add.run' final collection path set to .
+2026-03-17 10:09:25,104 DEBUG 'ansible_creator.add._resource_scaffold' Started adding role to destination
+2026-03-17 10:09:25,104 ERROR 'ansible_creator.cli.run' The path . is not a valid Ansible collection path. Please provide the root path of a valid ansible collection.

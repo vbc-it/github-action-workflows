@@ -7,3 +7,9 @@ repos:
       - id: check-yaml
         args:
           - --allow-multiple-documents
+  - repo: https://github.com/ansible/ansible-lint
+    rev: v26.3.0
+    hooks:
+      - id: ansible-lint
+        args:
+          - --project-dir=tests/ansible_collections/
