@@ -293,13 +293,15 @@ jobs:
 
       - name: Run molecule tests for role ${{ matrix.role }} scenario ${{ matrix.scenario }}
         run: |
+          source ${GITHUB_WORKSPACE}/${{ inputs.collection-path }}/.venv/bin/activate
           if [[ -n "${{ inputs.molecule_env_file }}" ]]; then
             set -a && source "${{ inputs.molecule_env_file }}" && set +a
           fi
-          uv run molecule --version
+          molecule --version
           # required because with shared_state dependency is not executed before create scenario, but create needs dependencies to be installed
-          uv run molecule dependency --scenario-name "${{ matrix.scenario }}"
-          uv run molecule test --scenario-name "${{ matrix.scenario }}" --parallel
+          molecule dependency --scenario-name "${{ matrix.scenario }}"
+          molecule test --scenario-name "${{ matrix.scenario }}"
+
         working-directory: ${{ matrix.is_native && inputs.collection-path || format('{0}/roles/{1}', inputs.collection-path, matrix.role) }}
         env:
           PY_COLORS: '1'
