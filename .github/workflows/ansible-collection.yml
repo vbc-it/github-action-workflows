@@ -37,10 +37,31 @@ jobs:
 
 
   ansible-lint:
-    needs: pre-commit
-    uses: ansible/ansible-content-actions/.github/workflows/ansible_lint.yaml@main
-    with:
-      working_directory: ${{ inputs.collection-path }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check if requirements.yml exists
+        id: check-requirements
+        run: |
+          if [[ -f "${{ inputs.collection-path }}/requirements.yml" ]]; then
+            echo "has-requirements=true" >> $GITHUB_OUTPUT
+          else
+            echo "has-requirements=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run ansible-lint (with requirements)
+        if: steps.check-requirements.outputs.has-requirements == 'true'
+        uses: ansible/ansible-lint@main # or vX.X.X version
+        with:
+          working_directory: ${{ inputs.collection-path }}
+          requirements_file: "requirements.yml"
+
+      - name: Run ansible-lint (without requirements)
+        if: steps.check-requirements.outputs.has-requirements == 'false'
+        uses: ansible/ansible-lint@main # or vX.X.X version
+        with:
+          working_directory: ${{ inputs.collection-path }}
 
   sanity:
     needs: ansible-lint
