@@ -23,11 +23,64 @@ on:
         required: false
         default: ''
         type: string
+      publish_to_automationhub:
+        description: 'Build and publish the collection to a private Automation Hub when running on a tag'
+        required: false
+        default: false
+        type: boolean
+      automationhub_url:
+        description: 'Private Automation Hub API endpoint used by ansible-galaxy collection publish'
+        required: false
+        default: 'https://tower.vbc.ac.at/api/galaxy/'
+        type: string
+    secrets:
+      automationhub_token:
+        description: 'Token for publishing to private Automation Hub'
+        required: false
 
 
 jobs:
 
+  validate-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate tag and publish configuration
+        if: ${{ inputs.publish_to_automationhub && github.ref_type == 'tag' }}
+        run: |
+          if [[ -z "${{ inputs.automationhub_url }}" ]]; then
+            echo "publish_to_automationhub=true requires automationhub_url." >&2
+            exit 1
+          fi
+
+          if [[ -z "${{ secrets.automationhub_token }}" ]]; then
+            echo "publish_to_automationhub=true requires secrets.automationhub_token." >&2
+            exit 1
+          fi
+
+          galaxy_file="${{ inputs.collection-path }}/galaxy.yml"
+          if [[ ! -f "$galaxy_file" ]]; then
+            echo "Could not find galaxy.yml at $galaxy_file" >&2
+            exit 1
+          fi
+
+          galaxy_version=$(sed -nE "s/^[[:space:]]*version:[[:space:]]*['\"]?([^'\"[:space:]]+)['\"]?[[:space:]]*$/\1/p" "$galaxy_file" | head -n1)
+          if [[ -z "$galaxy_version" ]]; then
+            echo "Unable to read version from $galaxy_file" >&2
+            exit 1
+          fi
+
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "$tag_version" != "$galaxy_version" ]]; then
+            echo "Tag '${GITHUB_REF_NAME}' does not match galaxy.yml version '${galaxy_version}'" >&2
+            exit 1
+          fi
+
+          echo "Tag '${GITHUB_REF_NAME}' matches galaxy.yml version '${galaxy_version}'"
+
   pre-commit:
+    needs: validate-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -37,6 +90,7 @@ jobs:
 
 
   ansible-lint:
+    needs: validate-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -335,6 +389,7 @@ jobs:
     if: always()
 
     needs:
+      - validate-release
       - pre-commit
       - sanity
       - molecule
@@ -347,3 +402,31 @@ jobs:
         with:
           jobs: ${{ toJSON(needs) }}
           allowed-skips: molecule
+
+  publish-automationhub:
+    needs: check
+    runs-on: self-hosted
+    if: ${{ always() && needs.check.result == 'success' && inputs.publish_to_automationhub && github.ref_type == 'tag' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Sync dependencies with uv
+        run: uv sync --dev
+        working-directory: ${{ inputs.collection-path }}
+
+      - name: Build collection artifact
+        run: uv run ansible-galaxy collection build --output-path dist
+        working-directory: ${{ inputs.collection-path }}
+
+      - name: Publish collection artifact to private Automation Hub
+        run: |
+          artifact=$(ls -1 dist/*.tar.gz | head -n1)
+          if [[ -z "$artifact" ]]; then
+            echo "No built collection artifact found in dist/." >&2
+            exit 1
+          fi
+          uv run ansible-galaxy collection publish "$artifact" --server "${{ inputs.automationhub_url }}" --token "${{ secrets.automationhub_token }}"
+        working-directory: ${{ inputs.collection-path }}
