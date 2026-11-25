@@ -8,9 +8,17 @@ Reusable GitHub Actions workflows for Ansible collection CI.
 
 Runs:
 
-- `pre-commit`
-- Ansible `sanity` tests (stable `2.16`, `2.17`, `2.18`)
+- `pre-commit` and `ansible-lint`
+- Ansible `sanity` tests (default: stable `2.16`, `2.17`, `2.18`; set `sanity_ansible_versions`)
 - Molecule tests for discovered role/scenario combinations
+
+`pre-commit`, `ansible-lint`, `sanity` and Molecule discovery start in parallel once `validate-release` passes, so Molecule doesn't wait for lint and sanity. The `check` job aggregates all of them and gates publishing.
+
+Molecule runs the scenarios of the roles touched by the changeset:
+
+- Files under `roles/<role>/` or `extensions/molecule/<role>/` select that role.
+- Other files under `extensions/molecule/` (shared `config.yml`, inventory, `default` scenario), the `molecule_env_file`, and files matching `molecule_all_roles_paths` select all roles.
+- `schedule` and `workflow_dispatch` runs, and `force_all_roles: true`, test all roles.
 
 Inputs:
 
@@ -19,7 +27,10 @@ Inputs:
 - `force_all_roles` (boolean, default: `false`): test all roles instead of changed roles only
 - `molecule_env_file` (string, default: `''`): optional environment file sourced before Molecule runs
 - `publish_to_automationhub` (boolean, default: `false`): when `true`, build and publish collection artifact on tag runs
-- `automationhub_url` (string, default: `''`): private Automation Hub API endpoint passed to `ansible-galaxy collection publish --server`
+- `automationhub_url` (string, default: `https://tower.vbc.ac.at/api/galaxy/`): private Automation Hub API endpoint passed to `ansible-galaxy collection publish --server`
+- `sanity_ansible_versions` (string, default: `'["stable-2.16", "stable-2.17", "stable-2.18"]'`): JSON list of ansible-core branches for the sanity matrix; match it to `requires_ansible` in `meta/runtime.yml`
+- `molecule_all_roles_paths` (string, default: `plugins/*`, `requirements.yml`, `tests/requirements.yml`, `pyproject.toml`, `uv.lock`): newline-separated shell patterns, relative to `collection-path`, whose changes run the scenarios of all roles (`*` also matches `/`)
+- `molecule_timeout_minutes` (number, default: `120`): timeout for each Molecule scenario job
 
 Secrets:
 
@@ -29,6 +40,10 @@ Tag validation:
 
 - When `publish_to_automationhub=true` and the workflow runs on a tag, CI validates that the tag version matches `galaxy.yml` `version` (supports tag names like `1.2.3` and `v1.2.3`).
 - If the versions do not match, the workflow fails before test jobs continue.
+
+Caching:
+
+- `setup-uv` caches uv downloads in the GitHub Actions cache on GitHub-hosted runners. On self-hosted runners uv's cache in `~/.cache/uv` and Galaxy content in `~/.ansible` stay on the runner between jobs, so no GitHub Actions cache is used there.
 
 ## How to use
 
@@ -41,6 +56,15 @@ on:
     pull_request:
     push:
         branches: [main]
+        tags: ['*']
+    schedule:
+        - cron: '0 4 * * 1'
+    workflow_dispatch:
+
+# Cancel superseded runs of a pull request; let main, tag and scheduled runs finish.
+concurrency:
+    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
     tests:

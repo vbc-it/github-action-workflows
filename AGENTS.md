@@ -39,10 +39,12 @@ Run from repository root unless noted otherwise.
 
 ## Important CI Behavior To Preserve
 
-- Job order: `pre-commit` and `ansible-lint` before `sanity`; `discover` after `sanity`; `molecule` after `discover`.
-- Sanity matrix currently includes `stable-2.16`, `stable-2.17`, `stable-2.18`.
+- Job order: `pre-commit`, `ansible-lint`, `sanity` and `discover` all start after `validate-release` and run in parallel; `molecule` runs after `discover`; `check` needs all of them and gates `publish-automationhub`.
+- Sanity matrix comes from the `sanity_ansible_versions` input (default `stable-2.16`, `stable-2.17`, `stable-2.18`).
+- Third-party actions are pinned to release commit SHAs with a `# vX.Y.Z` comment; first-party `actions/*` may use major tags.
 - Discovery must continue to:
   - Respect `force_all_roles` and event-based full-run conditions.
+  - Map changed files to roles (`roles/<role>/`, `extensions/molecule/<role>/`) and select all roles for shared Molecule files, `molecule_env_file` and `molecule_all_roles_paths`.
   - Handle Molecule "glob failed" as a skip condition, not a hard failure.
   - Deduplicate discovered role/scenario pairs before matrix fan-out.
 - Final `check` job is used for branch protection and must aggregate upstream status.
