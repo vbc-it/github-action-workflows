@@ -56,6 +56,20 @@ on:
         required: false
         default: 120
         type: number
+      publish_runner:
+        description: >-
+          Runner label for the publish job. Automation Hub is only reachable from
+          internal runners; use a label that only dedicated release runners carry
+        required: false
+        default: 'self-hosted'
+        type: string
+      publish_environment:
+        description: >-
+          GitHub environment of the publish job in the calling repository. Protect it
+          with required reviewers and a deployment tag rule; the token can be stored there
+        required: false
+        default: 'automationhub'
+        type: string
     secrets:
       automationhub_token:
         description: 'Token for publishing to private Automation Hub'
@@ -618,9 +632,12 @@ jobs:
           jobs: ${{ toJSON(needs) }}
           allowed-skips: molecule
 
-  publish-automationhub:
+  # Builds the release tarball without any secrets. The publish job below only
+  # downloads this artifact, so no code from the repository runs next to the token.
+  build-collection:
+    name: Build collection
     needs: check
-    runs-on: self-hosted
+    runs-on: ${{ inputs.platform }}
     timeout-minutes: 20
     if: ${{ always() && needs.check.result == 'success' && inputs.publish_to_automationhub && github.ref_type == 'tag' }}
     permissions:
@@ -628,7 +645,21 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Check that the tag points to a commit on the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [[ -z "$DEFAULT_BRANCH" ]]; then
+            echo "Cannot determine the default branch for event '$GITHUB_EVENT_NAME'." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/$DEFAULT_BRANCH"; then
+            echo "Tag '$GITHUB_REF_NAME' points to $GITHUB_SHA, which is not on '$DEFAULT_BRANCH'; refusing to publish." >&2
+            exit 1
+          fi
 
       - name: Set up uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
@@ -640,21 +671,79 @@ jobs:
         working-directory: ${{ inputs.collection-path }}
 
       - name: Build collection artifact
-        run: uv run --locked ansible-galaxy collection build --output-path dist
         working-directory: ${{ inputs.collection-path }}
+        run: |
+          rm -rf dist
+          uv run --locked ansible-galaxy collection build --output-path dist
+          shopt -s nullglob
+          artifacts=(dist/*.tar.gz)
+          if [[ ${#artifacts[@]} -ne 1 ]]; then
+            echo "Expected exactly one collection tarball in dist/, found ${#artifacts[@]}." >&2
+            exit 1
+          fi
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "${artifacts[0]}" != *"-${tag_version}.tar.gz" ]]; then
+            echo "Built ${artifacts[0]} does not match tag version '${tag_version}'." >&2
+            exit 1
+          fi
+          sha256sum "${artifacts[0]}"
 
+      - name: Upload collection artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: collection
+          path: ${{ inputs.collection-path }}/dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-automationhub:
+    name: Publish to Automation Hub
+    needs: build-collection
+    # Automation Hub is only reachable from internal runners. Use a label that
+    # only release runners carry, separate from the runners that execute tests.
+    runs-on: ${{ inputs.publish_runner }}  # zizmor: ignore[self-hosted-runner]
+    # Caller-side GitHub environment: add required reviewers and a tag rule there.
+    environment: ${{ inputs.publish_environment }}
+    timeout-minutes: 20
+    if: ${{ always() && needs.build-collection.result == 'success' && inputs.publish_to_automationhub && github.ref_type == 'tag' }}
+    # No checkout and no repository token: this job only downloads the artifact
+    # from this run and uploads it.
+    permissions: {}
+    steps:
+      - name: Download collection artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: collection
+          path: ${{ runner.temp }}/collection
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: "0.13.9"
+          enable-cache: false
+
+      # ansible-galaxy comes from a fixed ansible-core release, resolved as of a
+      # fixed date, built from wheels only, with a throwaway uv cache and Python
+      # install, so nothing left on a shared runner by other jobs is reused.
       # The token reaches ansible-galaxy through its server configuration in the
       # environment, so it is neither in the generated script nor on the command line.
       - name: Publish collection artifact to private Automation Hub
+        working-directory: ${{ runner.temp }}/collection
         env:
+          ANSIBLE_CORE_VERSION: "2.20.11"
+          UV_EXCLUDE_NEWER: "2026-11-19T00:00:00Z"
+          UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/uv-python
           ANSIBLE_GALAXY_SERVER_LIST: automationhub
           ANSIBLE_GALAXY_SERVER_AUTOMATIONHUB_URL: ${{ inputs.automationhub_url }}
           ANSIBLE_GALAXY_SERVER_AUTOMATIONHUB_TOKEN: ${{ secrets.automationhub_token }}
         run: |
-          artifact=$(ls -1 dist/*.tar.gz | head -n1)
-          if [[ -z "$artifact" ]]; then
-            echo "No built collection artifact found in dist/." >&2
+          shopt -s nullglob
+          artifacts=(*.tar.gz)
+          if [[ ${#artifacts[@]} -ne 1 ]]; then
+            echo "Expected exactly one downloaded collection tarball, found ${#artifacts[@]}." >&2
             exit 1
           fi
-          uv run --locked ansible-galaxy collection publish "$artifact" --server automationhub
-        working-directory: ${{ inputs.collection-path }}
+          sha256sum "${artifacts[0]}"
+          uv tool run --no-cache --no-config --python 3.12 --no-build \
+            --from "ansible-core==${ANSIBLE_CORE_VERSION}" \
+            ansible-galaxy collection publish "${artifacts[0]}" --server automationhub
