@@ -111,20 +111,37 @@ Caching:
 
 ### `.github/workflows/container-image.yml`
 
-Builds one container image from a Dockerfile with `docker build --pull`, pushes it with `skopeo` and can launch an AAP job template afterwards.
+Builds one container image from a Dockerfile with `docker build --pull`, pushes it with `skopeo` and can launch an AAP job template afterwards. Three jobs keep the code of the calling repository away from the credentials:
+
+- `build` runs on `platform` with `contents: read` and no secrets. It builds the image and, when `push: true`, exports it by the image ID that `docker build --iidfile` wrote (not by its local tag, which another job on the same daemon could retag) to an OCI archive and uploads it as a workflow artifact (`container-image-<run>-<attempt>-<hash>`, kept for one day). The manifest digest is fixed at this point and passed on as a job output.
+- `push` runs on `push_runner` in the `push_environment` environment, only when `push: true`. It checks out nothing and runs no code from the repository: it downloads the archive by artifact ID, checks that its manifest digest is the one `build` reported, logs in and copies it with `skopeo copy --preserve-digests`. The first tag is pushed from the archive and every further tag is copied from that manifest digest in the registry; the job fails if a tag ends up with another digest. The digest is written to the job summary and returned as the `digest` and `image_ref` outputs.
+- `deploy` runs on `push_runner` in the `deploy_environment` environment, only after a push and only when `aap_job_template` is set. It launches the template with `aap_launch` as request body, with the pushed image by digest added to `extra_vars` (see `aap_image_var`), and fails unless the AAP job ends as `successful`. curl reads the AAP credentials as a config from a pipe, so they never appear in process arguments on the runner host.
+
+Other behaviour:
 
 - The image is labelled with `org.opencontainers.image.source` (the calling repository) and `org.opencontainers.image.revision` (the commit).
-- `push: false` (the default) only builds. The caller decides when to push, for example `push: ${{ github.event_name == 'push' }}`.
-- The pushed reference is `<registry>/<namespace>/<image>:<tag>` for every tag in `tags`. Without `tags`, the branch or tag name of the run is the tag.
+- `push: false` (the default) only builds; `push` and `deploy` are skipped. The caller decides when to push, for example `push: ${{ github.event_name == 'push' }}`.
+- The pushed reference is `<registry>/<namespace>/<image>:<tag>` for every tag in `tags`. Without `tags`, the branch or tag name of the run is the tag. A branch whose name looks like a release or moving tag (`latest`, `stable`, or starting with a digit or `v` and a digit, e.g. `v2.0.0`) is refused: set `tags` explicitly to push such a branch. Every tag must be a valid image tag (`[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}`), so a branch like `feature/x` needs explicit `tags`.
 - A build that pushes uses `--no-cache`, so it cannot reuse layers that another job on a shared docker daemon put in the build cache. `push: false` builds keep the cache.
-- The image is pushed by the image ID that `docker build --iidfile` wrote, not by its local tag, which another job on the same daemon could retag. The first tag is pushed from the daemon and every further tag is copied from that manifest digest in the registry; the job fails if a tag ends up with another digest. The digest is written to the job summary and returned as the `digest` and `image_ref` outputs.
-- The `deploy` job runs only after a push and only when `aap_job_template` is set. It launches the template with `aap_launch` as request body and fails unless the AAP job ends as `successful`. curl reads the AAP credentials as a config from a pipe, so they never appear in process arguments on the runner host.
 - A repository with several images calls the workflow once per image, for example from a matrix.
+
+Environments (the push and deploy gate):
+
+- `push` and `deploy` reference GitHub environments of the calling repository. GitHub creates a missing environment without any protection on first use, so the defaults keep working, but the gate only exists once you configure it: in the calling repository's settings, give `registry` (or your `push_environment`) and `aap` (or your `deploy_environment`) required reviewers and deployment branch and tag rules, e.g. only `main` and `v*` tags.
+- Store the credentials there as environment secrets named `REGISTRY_PASSWORD`, `AAP_USERNAME` and `AAP_PASSWORD`. Inside a job with an environment, an environment secret takes precedence over the secret the caller passes, and branches the environment does not allow cannot read it. Remove the repository secrets once the environment secrets are in place; a repository secret can be read by the workflow of any branch.
+- Each job waits for its own approval, so a run with `aap_job_template` asks for two approvals when both environments require reviewers. Use one environment for both (`deploy_environment: registry`) if one approval is enough.
+- Where the registry supports it, make release tags immutable (e.g. a Quay immutability policy for `v*`), so a pushed `v1.2.3` cannot be overwritten later by any push, approved or not.
+- The image archive is uploaded as a workflow artifact. In a public repository, artifacts can be downloaded by any signed-in GitHub user while they exist (one day), so do not use this workflow for images that must not be public in a public repository. Large images count towards the artifact storage quota.
+
+Deploy by digest:
+
+- `deploy` sets `extra_vars.<aap_image_var>` (default `container_image_ref`) in `aap_launch` to `<registry>/<namespace>/<image>@sha256:...`, overriding a value the caller set. Use it in the playbook instead of a tag, which can move between the push and the launch. `aap_launch` must be a JSON object and its `extra_vars`, if set, a JSON object (or a string holding a JSON object; YAML strings are refused). The job template must allow variables on launch ("Prompt on launch" for variables, or a survey with that variable); when AAP reports the extra vars as ignored, the job warns. Set `aap_image_var: ''` to send `aap_launch` unchanged.
 
 Requirements:
 
-- The runner needs `docker`, `skopeo`, `curl` and `jq`. `quay.vbc.ac.at` and `tower.vbc.ac.at` need a self-hosted runner.
-- Grant `contents: read`.
+- `platform` needs `docker` (with BuildKit) and `skopeo`; `push_runner` needs `skopeo`, `curl` and `jq`. skopeo must support `--digestfile`, `--preserve-digests` and the `docker-daemon:` transport by image ID (tested with 1.25.2). `quay.vbc.ac.at` and `tower.vbc.ac.at` need a self-hosted runner.
+- Point `push_runner` at runners you trust with the registry and AAP credentials, ideally dedicated and ephemeral ones that do not run builds: a runner that also builds images or runs tests can be tampered with by code from any branch.
+- Grant `contents: read`. Environments need no extra token permission.
 
 Inputs:
 
@@ -139,15 +156,19 @@ Inputs:
 - `tags` (string, default: branch or tag name): newline-separated tags to push
 - `push` (boolean, default: `false`)
 - `platform` (string, default: `self-hosted`): runner to build on
+- `push_runner` (string, default: `''`): runner for `push` and `deploy`; empty uses `platform`
+- `push_environment` (string, default: `registry`): GitHub environment of the `push` job in the calling repository
+- `deploy_environment` (string, default: `aap`): GitHub environment of the `deploy` job in the calling repository
 - `aap_job_template` (string, default: `''`): numeric ID of the AAP job template to launch after a push
 - `aap_launch` (string, default: `{}`): JSON body of the launch request, e.g. `{"job_tags": "reload", "extra_vars": {"tag": "main"}}`
+- `aap_image_var` (string, default: `container_image_ref`): extra var that receives the pushed image by digest; empty adds none
 - `aap_url` (string, default: `https://tower.vbc.ac.at`)
 - `aap_timeout_minutes` (number, default: `60`)
 
 Secrets:
 
-- `registry_password` (optional): required when `push: true`
-- `aap_username`, `aap_password` (optional): required when `aap_job_template` is set
+- `registry_password` (optional): required when `push: true`; prefer an environment secret `REGISTRY_PASSWORD` in `push_environment`
+- `aap_username`, `aap_password` (optional): required when `aap_job_template` is set; prefer environment secrets `AAP_USERNAME` and `AAP_PASSWORD` in `deploy_environment`
 
 Outputs:
 
@@ -163,15 +184,18 @@ on:
     pull_request:
     push:
         branches: [main]
-        tags: ['*']
+        tags: ['v*']
 
 jobs:
     image:
         permissions:
             contents: read
         uses: your-org/github-action-workflows/.github/workflows/container-image.yml@main
+        # REGISTRY_PASSWORD, AAP_USERNAME and AAP_PASSWORD are environment
+        # secrets of the protected environments "registry" and "aap"; they
+        # take precedence over what is passed here.
         secrets:
-            registry_password: ${{ secrets.QUAY_PASSWORD }}
+            registry_password: ${{ secrets.REGISTRY_PASSWORD }}
             aap_username: ${{ secrets.AAP_USERNAME }}
             aap_password: ${{ secrets.AAP_PASSWORD }}
         with:
@@ -180,8 +204,12 @@ jobs:
             build_args: |
                 NETBOX_VERSION=v4.6.10-5.0.2
             push: ${{ github.event_name == 'push' }}
+            push_runner: release
+            push_environment: registry
+            deploy_environment: aap
             aap_job_template: ${{ github.ref_type == 'branch' && '123' || '' }}
-            aap_launch: '{"job_tags": "reload", "extra_vars": {"app_generic_image_tag": "main"}}'
+            # The playbook deploys extra_vars.container_image_ref (image@sha256:...).
+            aap_launch: '{"job_tags": "reload"}'
 ```
 
 The self-test builds `tests/container_image` without pushing.

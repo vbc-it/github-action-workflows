@@ -43,7 +43,9 @@ on:
         default: ''
         type: string
       tags:
-        description: 'Newline-separated tags to push; defaults to the branch or tag name of the run'
+        description: >-
+          Newline-separated tags to push; defaults to the branch or tag name of the run. A branch
+          name that looks like a release or moving tag (latest, stable, v1.2, 1.2) is refused
         required: false
         default: ''
         type: string
@@ -53,9 +55,30 @@ on:
         default: false
         type: boolean
       platform:
-        description: 'Runner to build on; it needs docker, skopeo, curl and jq'
+        description: 'Runner to build on; it needs docker, skopeo and tar'
         required: false
         default: 'self-hosted'
+        type: string
+      push_runner:
+        description: >-
+          Runner for the push and deploy jobs; it needs skopeo, curl and jq. Empty uses platform.
+          Use a label that only runners you trust with the registry and AAP credentials carry
+        required: false
+        default: ''
+        type: string
+      push_environment:
+        description: >-
+          GitHub environment of the push job in the calling repository. Protect it with required
+          reviewers and deployment branch or tag rules; store REGISTRY_PASSWORD there
+        required: false
+        default: 'registry'
+        type: string
+      deploy_environment:
+        description: >-
+          GitHub environment of the deploy job in the calling repository. Protect it with required
+          reviewers and deployment branch or tag rules; store AAP_USERNAME and AAP_PASSWORD there
+        required: false
+        default: 'aap'
         type: string
       aap_job_template:
         description: 'ID of an AAP job template to launch after a push; empty launches nothing'
@@ -66,6 +89,13 @@ on:
         description: 'JSON body of the AAP launch request, e.g. {"job_tags": "reload", "extra_vars": {"tag": "main"}}'
         required: false
         default: '{}'
+        type: string
+      aap_image_var:
+        description: >-
+          Name of the extra var that the deploy job sets in aap_launch to the pushed image as
+          <registry>/<namespace>/<image>@<digest>; empty sets none
+        required: false
+        default: 'container_image_ref'
         type: string
       aap_url:
         description: 'Base URL of the AAP controller'
@@ -90,21 +120,23 @@ on:
     outputs:
       digest:
         description: 'Manifest digest of the pushed image; empty when push is false'
-        value: ${{ jobs.build.outputs.digest }}
+        value: ${{ jobs.push.outputs.digest }}
       image_ref:
         description: 'Pushed image as <registry>/<namespace>/<image>@<digest>; empty when push is false'
-        value: ${{ jobs.build.outputs.image_ref }}
+        value: ${{ jobs.push.outputs.image_ref }}
 
 jobs:
 
+  # Builds the caller's Dockerfile without any registry or AAP credentials and
+  # hands the image to the push job as an OCI archive artifact.
   build:
     runs-on: ${{ inputs.platform }}
     timeout-minutes: 120
     permissions:
       contents: read
     outputs:
-      digest: ${{ steps.push.outputs.digest }}
-      image_ref: ${{ steps.push.outputs.image_ref }}
+      digest: ${{ steps.export.outputs.digest }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -112,15 +144,16 @@ jobs:
           persist-credentials: false
 
       # Callers build several images of one run in parallel on runners that can share a docker daemon.
-      - name: Name the local image and the registry auth file after the run and the image
+      - name: Name the local image and the archive after the run and the image
         env:
           IMAGE: ${{ inputs.image }}
         run: |
           build="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(printf '%s' "$IMAGE" | sha256sum | cut -c1-12)"
           {
+            echo "BUILD_NAME=${build}"
             echo "LOCAL_IMAGE=localhost/container-image:${build}"
             echo "IMAGE_ID_FILE=${RUNNER_TEMP}/image-id-${build}"
-            echo "REGISTRY_AUTH_FILE=${RUNNER_TEMP}/registry-auth-${build}.json"
+            echo "ARCHIVE_DIR=${RUNNER_TEMP}/image-${build}"
           } >> "$GITHUB_ENV"
 
       - name: Build image
@@ -150,69 +183,169 @@ jobs:
             --tag "$LOCAL_IMAGE" \
             "$CONTEXT"
 
-      - name: Push image
-        id: push
+      # The manifest digest is fixed here: the push job copies the archive with
+      # --preserve-digests and fails if the registry ends up with another digest.
+      - name: Export image as OCI archive
+        id: export
         if: ${{ inputs.push }}
-        env:
-          REGISTRY: ${{ inputs.registry }}
-          REPOSITORY: ${{ inputs.registry }}/${{ inputs.namespace }}/${{ inputs.image }}
-          REGISTRY_USERNAME: ${{ inputs.registry_username }}
-          REGISTRY_PASSWORD: ${{ secrets.registry_password }}
-          TAGS: ${{ inputs.tags || github.ref_name }}
         run: |
-          if [[ -z "$REGISTRY_USERNAME" || -z "$REGISTRY_PASSWORD" ]]; then
-            echo "push=true requires registry_username and secrets.registry_password." >&2
-            exit 1
-          fi
-
-          # Push by the content-addressed image ID: another job on a shared docker daemon can retag LOCAL_IMAGE.
+          # Export by the content-addressed image ID: another job on a shared docker daemon can retag LOCAL_IMAGE.
           image_id=$(cat "$IMAGE_ID_FILE")
           if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "docker build wrote no valid image ID to ${IMAGE_ID_FILE}." >&2
             exit 1
           fi
 
-          skopeo login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin <<< "$REGISTRY_PASSWORD"
+          rm -rf "$ARCHIVE_DIR"
+          mkdir -p "$ARCHIVE_DIR"
+          skopeo copy --digestfile "${ARCHIVE_DIR}.digest" "docker-daemon:${image_id}" "oci-archive:${ARCHIVE_DIR}/image.tar"
+          digest=$(cat "${ARCHIVE_DIR}.digest")
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "skopeo wrote no valid manifest digest." >&2
+            exit 1
+          fi
+          echo "Built image ID \`${image_id}\`, manifest digest \`${digest}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
-          # The first tag is pushed from the daemon; later tags copy that manifest by digest within the registry.
-          digest=''
-          digest_file="${IMAGE_ID_FILE}.digest"
+      - name: Upload image archive
+        id: upload
+        if: ${{ inputs.push }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: container-image-${{ env.BUILD_NAME }}
+          path: ${{ env.ARCHIVE_DIR }}/image.tar
+          if-no-files-found: error
+          retention-days: 1
+          # The layers are already compressed.
+          compression-level: 0
+
+      - name: Remove local image and archive
+        if: ${{ always() }}
+        run: |
+          docker image rm --force "$LOCAL_IMAGE" || true
+          rm -rf "$IMAGE_ID_FILE" "$ARCHIVE_DIR" "${ARCHIVE_DIR}.digest"
+
+  # Runs no code from the calling repository: it only copies the archive that
+  # build produced. The environment holds the registry password and is where
+  # callers require reviewers and restrict branches and tags.
+  push:
+    needs: build
+    if: ${{ inputs.push }}
+    runs-on: ${{ inputs.push_runner || inputs.platform }}
+    environment: ${{ inputs.push_environment }}
+    timeout-minutes: 60
+    permissions: {}
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      image_ref: ${{ steps.push.outputs.image_ref }}
+    steps:
+      - name: Name the archive and the registry auth file after the run and the image
+        env:
+          IMAGE: ${{ inputs.image }}
+        run: |
+          build="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(printf '%s' "$IMAGE" | sha256sum | cut -c1-12)"
+          {
+            echo "ARCHIVE_DIR=${RUNNER_TEMP}/image-${build}"
+            echo "REGISTRY_AUTH_FILE=${RUNNER_TEMP}/registry-auth-${build}/auth.json"
+          } >> "$GITHUB_ENV"
+
+      - name: Download image archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ env.ARCHIVE_DIR }}
+
+      - name: Push image
+        id: push
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          REPOSITORY: ${{ inputs.registry }}/${{ inputs.namespace }}/${{ inputs.image }}
+          REGISTRY_USERNAME: ${{ inputs.registry_username }}
+          REGISTRY_PASSWORD: ${{ secrets.registry_password }}
+          TAGS: ${{ inputs.tags }}
+          BUILT_DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -o pipefail
+
+          if [[ -z "$REGISTRY_USERNAME" || -z "$REGISTRY_PASSWORD" ]]; then
+            echo "push=true requires registry_username and secrets.registry_password." >&2
+            exit 1
+          fi
+
+          # Without tags the ref name is the tag. A branch must not be able to
+          # overwrite release or moving tags just by its name.
+          if [[ -z "${TAGS//[[:space:]]/}" ]]; then
+            if [[ "$GITHUB_REF_TYPE" == "branch" && "$GITHUB_REF_NAME" =~ ^(latest|stable|v?[0-9].*)$ ]]; then
+              echo "Branch '${GITHUB_REF_NAME}' looks like a release or moving tag; set tags explicitly to push a branch with that name." >&2
+              exit 1
+            fi
+            TAGS="$GITHUB_REF_NAME"
+          fi
+
+          tags=()
           while IFS= read -r tag; do
             if [[ -z "$tag" ]]; then
               continue
             fi
-
-            if [[ -z "$digest" ]]; then
-              skopeo copy --digestfile "$digest_file" "docker-daemon:${image_id}" "docker://${REPOSITORY}:${tag}"
-              digest=$(cat "$digest_file")
-            else
-              skopeo copy --digestfile "$digest_file" "docker://${REPOSITORY}@${digest}" "docker://${REPOSITORY}:${tag}"
-              if [[ "$(cat "$digest_file")" != "$digest" ]]; then
-                echo "${REPOSITORY}:${tag} got digest $(cat "$digest_file") instead of ${digest}." >&2
-                exit 1
-              fi
+            if [[ ! "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+              echo "'${tag}' is not a valid image tag." >&2
+              exit 1
             fi
-            echo "Pushed \`${REPOSITORY}:${tag}\`" >> "$GITHUB_STEP_SUMMARY"
+            tags+=("$tag")
           done <<< "$TAGS"
-
-          if [[ -z "$digest" ]]; then
+          if [[ ${#tags[@]} -eq 0 ]]; then
             echo "No tag to push." >&2
             exit 1
           fi
+
+          # Check the archive before any credential is used: its manifest must
+          # be the one that build reported.
+          if [[ ! "$BUILT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "The build job reported no valid manifest digest." >&2
+            exit 1
+          fi
+          archive="${ARCHIVE_DIR}/image.tar"
+          archive_digest="sha256:$(skopeo inspect --raw "oci-archive:${archive}" | sha256sum | cut -d' ' -f1)"
+          if [[ "$archive_digest" != "$BUILT_DIGEST" ]]; then
+            echo "The image archive has manifest digest ${archive_digest}, but build reported ${BUILT_DIGEST}." >&2
+            exit 1
+          fi
+
+          install -d -m 700 "$(dirname "$REGISTRY_AUTH_FILE")"
+          skopeo login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin <<< "$REGISTRY_PASSWORD"
+
+          # The first tag is pushed from the archive; later tags copy that manifest by digest within the registry.
+          digest_file="${ARCHIVE_DIR}.digest"
+          digest="$BUILT_DIGEST"
+          for index in "${!tags[@]}"; do
+            tag="${tags[$index]}"
+            if [[ "$index" -eq 0 ]]; then
+              skopeo copy --preserve-digests --digestfile "$digest_file" "oci-archive:${archive}" "docker://${REPOSITORY}:${tag}"
+            else
+              skopeo copy --preserve-digests --digestfile "$digest_file" "docker://${REPOSITORY}@${digest}" "docker://${REPOSITORY}:${tag}"
+            fi
+            if [[ "$(cat "$digest_file")" != "$digest" ]]; then
+              echo "${REPOSITORY}:${tag} got digest $(cat "$digest_file") instead of ${digest}." >&2
+              exit 1
+            fi
+            echo "Pushed \`${REPOSITORY}:${tag}\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+
           echo "Digest: \`${REPOSITORY}@${digest}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "image_ref=${REPOSITORY}@${digest}" >> "$GITHUB_OUTPUT"
 
-      - name: Remove local image and registry credentials
+      - name: Remove archive and registry credentials
         if: ${{ always() }}
         run: |
-          docker image rm --force "$LOCAL_IMAGE" || true
-          rm -f "$REGISTRY_AUTH_FILE" "$IMAGE_ID_FILE" "${IMAGE_ID_FILE}.digest"
+          rm -rf "$(dirname "$REGISTRY_AUTH_FILE")" "$ARCHIVE_DIR" "${ARCHIVE_DIR}.digest"
 
   deploy:
-    needs: build
+    needs: push
     if: ${{ inputs.push && inputs.aap_job_template != '' }}
-    runs-on: ${{ inputs.platform }}
+    # tower.vbc.ac.at is only reachable from internal runners.
+    runs-on: ${{ inputs.push_runner || inputs.platform }}
+    environment: ${{ inputs.deploy_environment }}
     timeout-minutes: ${{ inputs.aap_timeout_minutes }}
     permissions: {}
     steps:
@@ -221,6 +354,8 @@ jobs:
           AAP_URL: ${{ inputs.aap_url }}
           AAP_JOB_TEMPLATE: ${{ inputs.aap_job_template }}
           AAP_LAUNCH: ${{ inputs.aap_launch }}
+          AAP_IMAGE_VAR: ${{ inputs.aap_image_var }}
+          IMAGE_REF: ${{ needs.push.outputs.image_ref }}
           AAP_USERNAME: ${{ secrets.aap_username }}
           AAP_PASSWORD: ${{ secrets.aap_password }}
         run: |
@@ -241,6 +376,20 @@ jobs:
             exit 1
           fi
 
+          # Deploy by digest: a tag can move between the push and the launch.
+          if [[ -n "$AAP_IMAGE_VAR" && ! "$IMAGE_REF" =~ @sha256:[0-9a-f]{64}$ ]]; then
+            echo "The push job reported no image digest." >&2
+            exit 1
+          fi
+          launch=$(jq -c --arg var "$AAP_IMAGE_VAR" --arg ref "$IMAGE_REF" '
+            if type != "object" then error("aap_launch must be a JSON object") else . end
+            | if $var == "" then . else
+                .extra_vars = ((.extra_vars // {})
+                  | if type == "string" then fromjson else . end
+                  | if type != "object" then error("extra_vars in aap_launch must be a JSON object") else . end
+                  | .[$var] = $ref)
+              end' <<< "$AAP_LAUNCH")
+
           # curl reads the credentials as a config from a pipe, so they never appear in its
           # arguments, which every process on the host can read from /proc/<pid>/cmdline.
           credentials="${AAP_USERNAME}:${AAP_PASSWORD}"
@@ -253,18 +402,22 @@ jobs:
                 --header 'Content-Type: application/json' "$@"
           }
 
-          if ! launch=$(aap --request POST --data "$AAP_LAUNCH" "${api}/job_templates/${AAP_JOB_TEMPLATE}/launch/"); then
-            echo "::error::AAP refused to launch job template ${AAP_JOB_TEMPLATE}: ${launch}"
+          if ! response=$(aap --request POST --data "$launch" "${api}/job_templates/${AAP_JOB_TEMPLATE}/launch/"); then
+            echo "::error::AAP refused to launch job template ${AAP_JOB_TEMPLATE}: ${response}"
             exit 1
           fi
 
-          job=$(jq -r '.job' <<< "$launch")
+          job=$(jq -r '.job' <<< "$response")
           if [[ ! "$job" =~ ^[0-9]+$ ]]; then
-            echo "::error::The AAP launch response has no job ID: ${launch}"
+            echo "::error::The AAP launch response has no job ID: ${response}"
             exit 1
           fi
           job_url="${AAP_URL%/}/execution/jobs/playbook/${job}/output"
           echo "Launched [AAP job ${job}](${job_url})" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n "$AAP_IMAGE_VAR" ]] && jq -e '.ignored_fields.extra_vars? // empty' <<< "$response" > /dev/null; then
+            echo "::warning::AAP ignored extra_vars, so the job does not get ${AAP_IMAGE_VAR}." \
+              "Enable 'Prompt on launch' for variables in job template ${AAP_JOB_TEMPLATE}."
+          fi
 
           # The job timeout ends the wait for a job that never finishes.
           while true; do
