@@ -65,6 +65,11 @@ on:
         required: false
         default: ''
         type: string
+      molecule_max_parallel:
+        description: 'Maximum number of Molecule scenario jobs running at the same time; 0 means no limit'
+        required: false
+        default: 0
+        type: number
       test_all_roles_on_tag:
         description: >-
           Test all roles on tag runs, like force_all_roles. With false, tag runs
@@ -655,6 +660,8 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.discover.outputs.role_scenarios) }}
       fail-fast: false
+      # 0 (the default) means no limit; a matrix has at most 256 jobs.
+      max-parallel: ${{ inputs.molecule_max_parallel > 0 && inputs.molecule_max_parallel || 256 }}
     permissions:
       contents: read
     steps:

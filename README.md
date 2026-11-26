@@ -54,6 +54,7 @@ Inputs:
 - `molecule_all_roles_paths` (string, default: `plugins/*`, `requirements.yml`, `tests/requirements.yml`, `pyproject.toml`, `uv.lock`): newline-separated shell patterns, relative to `collection-path`, whose changes run the scenarios of all roles (`*` also matches `/`)
 - `molecule_timeout_minutes` (number, default: `120`): timeout for each Molecule scenario job
 - `molecule_scenarios` (string, default: `''`): JSON object that selects scenarios per role, like the `roleConfigs` of the Jenkins pipeline, e.g. `'{"ssh": ["default", "hostbased"], "certificate": []}'`. A listed role runs only the listed scenarios and `[]` excludes the role. Unlike Jenkins, a role that is not listed still runs all its scenarios. Discovery fails when the JSON is invalid, a key is not a role under `roles/`, or a listed scenario of a selected role was not discovered. For native layouts a scenario can be given as Molecule names it (`role2/scenario1`) or without the role prefix (`scenario1`). Empty (the default) runs every discovered scenario
+- `molecule_max_parallel` (number, default: `0`): maximum number of Molecule scenario jobs that run at the same time (the matrix `max-parallel`); `0` means no limit
 - `test_all_roles_on_tag` (boolean, default: `true`): tag runs test all roles, like `force_all_roles`. With `false`, tag runs select roles from the changeset like branch pushes, so a release can be published with no Molecule scenario run
 
 Secrets:
