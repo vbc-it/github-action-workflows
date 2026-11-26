@@ -25,7 +25,7 @@ Requirements for calling repositories:
 
 - Grant `contents: read`, plus `pull-requests: read` for change detection on pull requests in private and internal repositories. All jobs except `discover` reduce the token to what they need; `discover` uses the token as the caller grants it.
 - The collection must have a committed `uv.lock` that matches `pyproject.toml`: dependencies are installed with `uv sync --locked`, which fails instead of re-resolving.
-- uv is pinned to `0.13.6` (the newest release whose checksum is built into the pinned `setup-uv`), which takes precedence over a `[tool.uv] required-version` in the caller's `pyproject.toml`.
+- uv is pinned to `0.13.9` (the newest release whose checksum is built into the pinned `setup-uv`), which takes precedence over a `[tool.uv] required-version` in the caller's `pyproject.toml`.
 
 Inputs:
 

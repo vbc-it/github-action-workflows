@@ -200,7 +200,7 @@ jobs:
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           # A fixed uv release is checked against the checksum built into setup-uv.
-          version: '0.13.6'
+          version: "0.13.9"
           enable-cache: false
 
       - name: Install ansible-core
@@ -296,7 +296,7 @@ jobs:
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           # Newest version whose checksum is built into this setup-uv release.
-          version: "0.13.6"
+          version: "0.13.9"
 
       - name: Sync dependencies with uv
         run: uv sync --locked --dev
@@ -568,7 +568,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "0.13.6"
+          version: "0.13.9"
 
       - name: Sync dependencies with uv
         run: uv sync --locked --dev
@@ -633,7 +633,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "0.13.6"
+          version: "0.13.9"
 
       - name: Sync dependencies with uv
         run: uv sync --locked --dev
