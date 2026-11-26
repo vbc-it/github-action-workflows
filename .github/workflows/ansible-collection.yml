@@ -506,8 +506,8 @@ jobs:
             done < <(jq -r 'keys[]' <<< "$selection")
           fi
 
-          # molecule_lock_scenarios is read by the molecule job's concurrency
-          # expression; check it here for a clear error.
+          # molecule_lock_scenarios is read by an expression in the molecule
+          # job; check it here for a clear error.
           if ! jq -e 'type == "array" and all(.[]; type == "string")' <<< "${MOLECULE_LOCK_SCENARIOS:-[]}" > /dev/null 2>&1; then
             echo '::error::molecule_lock_scenarios must be a JSON list of scenario names, e.g. ["certificate/create"]'
             exit 1
@@ -703,7 +703,7 @@ jobs:
             echo "$role_scenarios_json" | jq -r '.[] | "  - " + (if .is_native then .scenario else (.role + "/" + .scenario) end) + " [native=\(.is_native)]"'
           fi
 
-  molecule:
+  molecule:  # zizmor: ignore[excessive-permissions]
     needs: discover
     runs-on: ${{ inputs.platform }}
     timeout-minutes: ${{ inputs.molecule_timeout_minutes }}
@@ -714,19 +714,10 @@ jobs:
       fail-fast: false
       # 0 (the default) means no limit; a matrix has at most 256 jobs.
       max-parallel: ${{ inputs.molecule_max_parallel > 0 && inputs.molecule_max_parallel || 256 }}
-    # Scenarios in molecule_lock_scenarios share one group per repository, role and
-    # scenario, so runs of the same scenario wait for each other (GitHub keeps only
-    # the newest pending job of a group and cancels older pending ones). Every
-    # other job gets a group of its own and is never held back.
-    concurrency:
-      group: >-
-        ${{ contains(fromJSON(inputs.molecule_lock_scenarios), matrix.is_native && matrix.scenario || format('{0}/{1}', matrix.role, matrix.scenario))
-        && format('molecule-lock-{0}-{1}-{2}', github.repository, matrix.role, matrix.scenario)
-        || format('molecule-{0}-{1}-{2}-{3}-{4}-{5}-{6}', github.run_id, github.run_attempt,
-                  inputs.collection-path, inputs.platform, matrix.is_native, matrix.role, matrix.scenario) }}
-      cancel-in-progress: false
-    permissions:
-      contents: read
+    # No permissions: block: the job uses the token as the caller grants it, so
+    # callers that use molecule_lock_scenarios can grant contents: write for the
+    # lock branches while all others keep contents: read. Requesting write here
+    # would stop the whole run of every caller that does not grant it.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -778,6 +769,78 @@ jobs:
           rm -rf "$dir" && mkdir -p "$dir"
           echo "file=$dir/junit-molecule-${id}.xml" >> "$GITHUB_OUTPUT"
           echo "artifact=junit-molecule-${id}-${key}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      # molecule_lock_scenarios: a mutex per repository, role and scenario across
+      # all runs. The holder creates the branch molecule-lock/<role>/<scenario>
+      # through the API, which fails while it exists; waiters poll and never
+      # cancel. A lock older than molecule_timeout_minutes + 5 is stale (its
+      # holder can no longer be running) and is removed by the next waiter.
+      - name: Acquire scenario lock
+        id: lock
+        if: ${{ contains(fromJSON(inputs.molecule_lock_scenarios), matrix.is_native && matrix.scenario || format('{0}/{1}', matrix.role, matrix.scenario)) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROLE: ${{ matrix.role }}
+          SCENARIO: ${{ matrix.scenario }}
+          STALE_MINUTES: ${{ inputs.molecule_timeout_minutes }}
+        run: |
+          set -euo pipefail
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+          gh_api() {
+            curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" "$@"
+          }
+          # Role and scenario names were checked by discover.
+          branch="molecule-lock/${ROLE}/${SCENARIO//\//__}"
+          holder="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT} ${ROLE}/${SCENARIO}"
+
+          no_write() {
+            echo "::error::Could not write to the repository. molecule_lock_scenarios needs contents: write on the calling job."
+            exit 1
+          }
+          # A parentless commit that names the holder; the lock branch points to it.
+          tree=$(gh_api -f -X POST "$api/git/trees" \
+            -d "$(jq -n --arg c "$holder" '{tree: [{path: "LOCK", mode: "100644", type: "blob", content: ($c + "\n")}]}')" | jq -er .sha) || no_write
+          commit=$(gh_api -f -X POST "$api/git/commits" \
+            -d "$(jq -n --arg m "Molecule lock held by $holder" --arg t "$tree" '{message: $m, tree: $t, parents: []}')" | jq -er .sha) || no_write
+          # Written before waiting, so the release step also cleans up after a
+          # cancel that lands right after the branch was created.
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+          stale=$(( (STALE_MINUTES + 5) * 60 ))
+          poll=${LOCK_POLL_SECONDS:-15}
+          response="$RUNNER_TEMP/molecule-lock.json"
+          last_holder=""
+          echo "Acquiring $branch"
+          while :; do
+            code=$(gh_api -o "$response" -w '%{http_code}' -X POST "$api/git/refs" \
+              -d "$(jq -n --arg r "refs/heads/$branch" --arg s "$commit" '{ref: $r, sha: $s}')")
+            if [[ "$code" == 201 ]]; then
+              echo "Acquired $branch"
+              exit 0
+            fi
+            if [[ "$code" != 422 ]] || ! jq -e '.message | test("already exists")' "$response" > /dev/null; then
+              cat "$response" >&2
+              echo "::error::Could not create $branch (HTTP $code). molecule_lock_scenarios needs contents: write on the calling job."
+              exit 1
+            fi
+            held=$(gh_api -f "$api/git/ref/heads/$branch" 2> /dev/null | jq -r .object.sha) || held=""
+            if [[ -n "$held" ]]; then
+              info=$(gh_api -f "$api/git/commits/$held")
+              age=$(( $(date +%s) - $(jq -r '.committer.date | fromdateiso8601' <<< "$info") ))
+              if (( age > stale )); then
+                printf '::warning::Removing stale lock %s (%s, %ss old)\n' "$branch" "$(jq -r .message <<< "$info")" "$age"
+                gh_api -f -X DELETE "$api/git/refs/heads/$branch" > /dev/null || true
+                continue
+              fi
+              if [[ "$held" != "$last_holder" ]]; then
+                echo "Waiting: $(jq -r .message <<< "$info") (${age}s)"
+                last_holder="$held"
+              fi
+            fi
+            sleep $(( poll + RANDOM % poll ))
+          done
 
       - name: Run molecule tests for role ${{ matrix.role }} scenario ${{ matrix.scenario }}
         run: |
@@ -851,6 +914,29 @@ jobs:
           PY_COLORS: '1'
           ANSIBLE_FORCE_COLOR: '1'
           ANSIBLE_ROLES_PATH: "${GITHUB_WORKSPACE}/${{ inputs.collection-path }}/roles:~/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles"
+
+      # Runs after failures and cancellations too; deletes the branch only
+      # while it still points to this job's commit.
+      - name: Release scenario lock
+        if: ${{ always() && steps.lock.outputs.commit != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCK_BRANCH: ${{ steps.lock.outputs.branch }}
+          LOCK_COMMIT: ${{ steps.lock.outputs.commit }}
+        run: |
+          set -euo pipefail
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+          gh_api() {
+            curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" "$@"
+          }
+          held=$(gh_api -f "$api/git/ref/heads/$LOCK_BRANCH" 2> /dev/null | jq -r .object.sha) || held=""
+          if [[ "$held" == "$LOCK_COMMIT" ]]; then
+            gh_api -f -X DELETE "$api/git/refs/heads/$LOCK_BRANCH" > /dev/null
+            echo "Released $LOCK_BRANCH"
+          else
+            echo "$LOCK_BRANCH is not held by this job; nothing to release"
+          fi
 
       - name: Upload test report
         if: ${{ always() && steps.report.outputs.artifact != '' }}

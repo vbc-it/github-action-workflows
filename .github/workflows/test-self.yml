@@ -10,6 +10,9 @@ permissions:
 
 jobs:
   ansible-collection-legacy:
+    # contents: write for the molecule_lock_scenarios lock branch.
+    permissions:
+      contents: write
     uses: ./.github/workflows/ansible-collection.yml
     with:
       platform: ubuntu-latest
@@ -18,8 +21,10 @@ jobs:
       # multi_scenario runs only "second"; single_scenario is unlisted and
       # still runs all its scenarios.
       molecule_scenarios: '{"multi_scenario": ["second"]}'
-      # Run test-self twice at once to see this scenario wait for the other run.
-      molecule_lock_scenarios: '["single_scenario/default"]'
+      # Concurrent test-self runs queue on this scenario instead of cancelling.
+      # Pull requests from forks get a read-only token, so they skip the lock.
+      molecule_lock_scenarios: >-
+        ${{ github.event.pull_request.head.repo.fork && '[]' || '["single_scenario/default"]' }}
       # Checked by resources/verify.yml of the fixture.
       molecule_base_config: tests/ansible_collections/legacy_collection/resources/molecule-base.yml
       ansible_config: tests/ansible_collections/legacy_collection/resources/ansible.cfg
@@ -60,6 +65,81 @@ jobs:
 
       - name: Run discover tests
         run: tests/discover/test_discover.sh
+
+      - name: Run lock tests
+        env:
+          PYTHON: tests/ansible_collections/legacy_collection/.venv/bin/python
+        run: tests/lock/test_lock.sh
+
+  # Two jobs of one run take the same lock through the real GitHub API; the
+  # check job proves they held it one after the other. The lock name is unique
+  # per run, so concurrent test-self runs never wait for each other here.
+  lock-queue:
+    if: ${{ !github.event.pull_request.head.repo.fork }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        job: [1, 2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Extract the lock steps
+        run: |
+          for step in "Acquire scenario lock" "Release scenario lock"; do
+            STEP="$step" yq '.jobs.molecule.steps[] | select(.name == strenv(STEP)) | .run' \
+              .github/workflows/ansible-collection.yml > "$RUNNER_TEMP/${step%% *}.sh"
+          done
+
+      - name: Acquire, hold and release the lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB: ${{ matrix.job }}
+          STALE_MINUTES: '10'
+          LOCK_POLL_SECONDS: '3'
+        run: |
+          export ROLE="test_self_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}" SCENARIO=queue
+          export GITHUB_OUTPUT="$RUNNER_TEMP/lock-output"
+          bash -eo pipefail "$RUNNER_TEMP/Acquire.sh"
+          acquired=$(date +%s.%N)
+          sleep 20
+          released=$(date +%s.%N)
+          LOCK_BRANCH=$(sed -n 's/^branch=//p' "$GITHUB_OUTPUT") \
+            LOCK_COMMIT=$(sed -n 's/^commit=//p' "$GITHUB_OUTPUT") \
+            bash -eo pipefail "$RUNNER_TEMP/Release.sh"
+          mkdir -p "$RUNNER_TEMP/times"
+          echo "$acquired $released" > "$RUNNER_TEMP/times/job-$JOB"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lock-queue-${{ matrix.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/times/
+          if-no-files-found: error
+
+  lock-queue-check:
+    needs: lock-queue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: lock-queue-*-${{ github.run_attempt }}
+          merge-multiple: true
+          path: times
+
+      - name: Check that the two jobs did not hold the lock at the same time
+        run: |
+          read -r a1 a2 < times/job-1
+          read -r b1 b2 < times/job-2
+          echo "job 1: $a1 - $a2, job 2: $b1 - $b2"
+          if awk -v a1="$a1" -v a2="$a2" -v b1="$b1" -v b2="$b2" 'BEGIN { exit !(a1 < b2 && b1 < a2) }'; then
+            echo "::error::Both jobs held the lock at the same time"
+            exit 1
+          fi
 
   ansible-collection-native:
     uses: ./.github/workflows/ansible-collection.yml
