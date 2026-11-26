@@ -44,8 +44,8 @@ Run from repository root unless noted otherwise.
 
 ## Important CI Behavior To Preserve
 
-- Job order: `pre-commit`, `ansible-lint`, `sanity`, `discover` and `build` (when `build_collection`) all start after `validate-release` and run in parallel; `molecule` (unlocked scenarios, `contents: read`) and `molecule-lock` run after `discover`; `molecule-locked` (scenarios in `molecule_lock_scenarios`, `contents: read`) runs after `molecule-lock`, and `molecule-unlock` (`always()`) after `molecule-locked`. Only the two lock jobs keep the caller's write token, and they run no repository code; `check` needs all of them; on tag runs with publishing enabled, `build-collection` (GitHub-hosted, no secrets) runs after `check`, and `publish-automationhub` (artifact only, in the caller's environment) runs after `build-collection`.
-- `validate-release` refuses tag runs with `publish_to_automationhub` that would not test all roles (`test_all_roles_on_tag` and `force_all_roles` false) unless `allow_untested_publish`; keep its condition in sync with discover's "Set test scope" step.
+- Job order: `pre-commit`, `ansible-lint`, `sanity`, `changes` and `build` (when `build_collection`) all start after `validate-release` and run in parallel; `discover` (`contents: read`) runs after `changes`; `molecule` (unlocked scenarios, `contents: read`) and `molecule-lock` run after `discover`; `molecule-locked` (scenarios in `molecule_lock_scenarios`, `contents: read`) runs after `molecule-lock`, and `molecule-unlock` (`always()`) after `molecule-locked`. Only `changes` and the two lock jobs keep the caller's token, and they run no repository code (no `uv`, Molecule or pre-commit); `check` needs all of them; on tag runs with publishing enabled, `build-collection` (GitHub-hosted, no secrets) runs after `check`, and `publish-automationhub` (artifact only, in the caller's environment) runs after `build-collection`.
+- `validate-release` refuses tag runs with `publish_to_automationhub` that would not test all roles (`test_all_roles_on_tag` and `force_all_roles` false) unless `allow_untested_publish`; keep its condition in sync with the `changes` job's "Set test scope" step.
 - Sanity matrix comes from the `sanity_ansible_versions` input (default `stable-2.16`, `stable-2.17`, `stable-2.18`).
 - All actions, including first-party `actions/*`, are pinned to release commit SHAs with a `# vX.Y.Z` comment. The repository setting "require SHA pinning" enforces this, so a tag reference fails the run.
 - Discovery must continue to:
@@ -53,7 +53,7 @@ Run from repository root unless noted otherwise.
   - Map changed files to roles (`roles/<role>/`, `extensions/molecule/<role>/`) and select all roles for shared Molecule files, `molecule_env_file` and `molecule_all_roles_paths`.
   - Handle Molecule "glob failed" as a skip condition (with a warning) only when no `molecule.yml` exists; any other `molecule list` failure fails discovery.
   - Run native scenarios whose top folder is no role whenever all roles are selected.
-  - Remove the checkout credentials after `dorny/paths-filter` and before any step that runs caller code (`uv sync`, `molecule list`).
+  - Keep changeset selection (`dorny/paths-filter`, which needs the caller's token and checkout credentials) in `changes`, and everything that runs caller code (`uv sync`, `molecule list`) in `discover` with `contents: read` and `persist-credentials: false`.
   - Deduplicate discovered role/scenario pairs before matrix fan-out.
 - Final `check` job is used for branch protection and must aggregate upstream status.
 
