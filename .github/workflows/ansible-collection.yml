@@ -56,6 +56,15 @@ on:
         required: false
         default: 120
         type: number
+      molecule_scenarios:
+        description: >-
+          JSON object mapping role names to the scenarios to run, e.g.
+          {"ssh": ["default", "hostbased"], "certificate": []}. A listed role runs
+          only the listed scenarios, [] excludes the role, unlisted roles run all
+          their scenarios. Empty means all discovered scenarios
+        required: false
+        default: ''
+        type: string
       test_all_roles_on_tag:
         description: >-
           Test all roles on tag runs, like force_all_roles. With false, tag runs
@@ -412,6 +421,7 @@ jobs:
           LISTED_ROLES: ${{ steps.list-roles.outputs.role_folders }}
           CHANGED_ROLES: ${{ steps.changed-roles.outputs.role_folders }}
           COLLECTION_PATH: ${{ inputs.collection-path }}
+          MOLECULE_SCENARIOS: ${{ inputs.molecule_scenarios }}
         run: |
           # Role and scenario names come from directory names in the caller's
           # changeset and end up in the job matrix, so only plain names pass.
@@ -427,6 +437,24 @@ jobs:
             local esc=$'\033' bel=$'\007' cr=$'\r'
             sed -E "s#${esc}\[[0-9;:?]*[ -/]*[@-~]##g; s#${esc}\][^${esc}${bel}]*(${bel}|${esc}\\\\)##g; s#${cr}##g"
           }
+
+          # molecule_scenarios: {"<role>": ["<scenario>", ...]}. Checked even
+          # when no role is selected, so a typo fails every run.
+          selection=''
+          if [[ -n "${MOLECULE_SCENARIOS//[[:space:]]/}" ]]; then
+            valid='if type == "object" and all(.[]; type == "array" and all(.[]; type == "string")) then . else error("invalid") end'
+            if ! selection=$(jq -ce "$valid" <<< "$MOLECULE_SCENARIOS" 2>/dev/null); then
+              echo '::error::molecule_scenarios must be a JSON object mapping role names to lists of scenario names,' \
+                'e.g. {"ssh": ["default"], "certificate": []}'
+              exit 1
+            fi
+            while IFS= read -r listed_role; do
+              if [[ ! "$listed_role" =~ $role_re || ! -d "$COLLECTION_PATH/roles/$listed_role" ]]; then
+                printf '::error::molecule_scenarios lists %q, which is not a role under roles/\n' "$listed_role"
+                exit 1
+              fi
+            done < <(jq -r 'keys[]' <<< "$selection")
+          fi
 
           folders=()
           if [[ "$ALL_ROLES" == "true" ]]; then
@@ -575,6 +603,35 @@ jobs:
 
           if [[ -n "$json_items" ]]; then
             role_scenarios_json=$(printf "%s" "$json_items" | jq -c -s 'unique_by([.role, .scenario, .is_native])')
+          fi
+
+          # Apply molecule_scenarios. A listed scenario matches the discovered
+          # name or, for native layouts, "<role>/<listed name>".
+          if [[ -n "$selection" ]]; then
+            selected_json=$(printf '%s\n' "${unique_folders[@]}" | jq -R . | jq -cs 'map(select(length > 0))')
+            missing=$(jq -r --argjson sel "$selection" --argjson selected "$selected_json" '
+              . as $found
+              | $sel | to_entries[]
+              | .key as $r
+              | select($selected | index($r))
+              | .value[] as $s
+              | select([$found[] | select(.role == $r and (.scenario == $s or .scenario == ($r + "/" + $s)))] | length == 0)
+              | "\($r): \($s)"' <<< "$role_scenarios_json")
+            if [[ -n "$missing" ]]; then
+              echo "::error::molecule_scenarios lists scenarios that discovery did not find:"
+              printf '  %s\n' "$missing"
+              exit 1
+            fi
+            # shellcheck disable=SC2016  # jq variables, not shell variables
+            filter='def wanted($sel): . as $e | ($sel | has($e.role) | not)
+              or any($sel[$e.role][]; $e.scenario == . or $e.scenario == ($e.role + "/" + .));'
+            excluded=$(jq -r --argjson sel "$selection" "$filter"'
+              .[] | select(wanted($sel) | not) | "  - " + (if .is_native then .scenario else .role + "/" + .scenario end)' <<< "$role_scenarios_json")
+            if [[ -n "$excluded" ]]; then
+              echo "Excluded by molecule_scenarios:"
+              printf '%s\n' "$excluded"
+            fi
+            role_scenarios_json=$(jq -c --argjson sel "$selection" "$filter"' map(select(wanted($sel)))' <<< "$role_scenarios_json")
           fi
 
           # Output the result

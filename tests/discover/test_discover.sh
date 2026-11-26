@@ -105,6 +105,43 @@ run_case "no parseable scenario fails" "$work/discover-fake.sh" fail "" \
 run_case "glob failed is skipped" "$work/discover-fake.sh" 0 "" \
   CHANGED_ROLES=single_scenario FAKE_OUTPUT="$work/glob-failed.txt" FAKE_RC=1
 
+# P4: molecule_scenarios.
+run_case "scenarios: listed role runs only listed, [] excludes" "$work/discover.sh" 0 \
+  "multi_scenario/second" "${legacy_all[@]}" \
+  'MOLECULE_SCENARIOS={"multi_scenario": ["second"], "single_scenario": []}'
+run_case "scenarios: unlisted role still runs all" "$work/discover.sh" 0 \
+  "multi_scenario/default single_scenario/default" "${legacy_all[@]}" \
+  'MOLECULE_SCENARIOS={"multi_scenario": ["default"]}'
+run_case "scenarios: everything excluded gives an empty matrix" "$work/discover.sh" 0 "" \
+  "${legacy_all[@]}" 'MOLECULE_SCENARIOS={"multi_scenario": [], "single_scenario": []}'
+run_case "scenarios: empty object changes nothing" "$work/discover.sh" 0 \
+  "multi_scenario/default multi_scenario/second single_scenario/default" "${legacy_all[@]}" 'MOLECULE_SCENARIOS={}'
+run_case "scenarios: whitespace only means auto-discovery" "$work/discover.sh" 0 \
+  "single_scenario/default" CHANGED_ROLES=single_scenario $'MOLECULE_SCENARIOS= \n'
+run_case "scenarios: listed scenario not discovered fails" "$work/discover.sh" fail "" \
+  "${legacy_all[@]}" 'MOLECULE_SCENARIOS={"multi_scenario": ["default", "missing"]}'
+run_case "scenarios: listed role that is not selected is not checked" "$work/discover.sh" 0 \
+  "single_scenario/default" CHANGED_ROLES=single_scenario 'MOLECULE_SCENARIOS={"multi_scenario": ["missing"]}'
+run_case "scenarios: unknown role fails" "$work/discover.sh" fail "" \
+  'MOLECULE_SCENARIOS={"no_such_role": []}'
+run_case "scenarios: invalid role name fails" "$work/discover.sh" fail "" \
+  'MOLECULE_SCENARIOS={"../x": []}'
+run_case "scenarios: not an object fails" "$work/discover.sh" fail "" \
+  'MOLECULE_SCENARIOS=["single_scenario"]'
+run_case "scenarios: scenario list of non-strings fails" "$work/discover.sh" fail "" \
+  'MOLECULE_SCENARIOS={"single_scenario": [1]}'
+run_case "scenarios: invalid JSON fails" "$work/discover.sh" fail "" \
+  'MOLECULE_SCENARIOS={"single_scenario": [}'
+run_case "scenarios: native short and full names" "$work/discover.sh" 0 \
+  "role1 role2/scenario2" "${native_all[@]}" \
+  'MOLECULE_SCENARIOS={"role1": ["role1"], "role2": ["scenario2"]}'
+run_case "scenarios: native full name, other role unlisted" "$work/discover.sh" 0 \
+  "role1 role2/scenario1" "${native_all[@]}" 'MOLECULE_SCENARIOS={"role2": ["role2/scenario1"]}'
+run_case "scenarios: native [] excludes" "$work/discover.sh" 0 \
+  "role2/scenario1 role2/scenario2" "${native_all[@]}" 'MOLECULE_SCENARIOS={"role1": []}'
+run_case "scenarios: native missing scenario fails" "$work/discover.sh" fail "" \
+  "${native_all[@]}" 'MOLECULE_SCENARIOS={"role2": ["scenario3"]}'
+
 if [[ $failures -ne 0 ]]; then
   echo "$failures case(s) failed"
   exit 1
