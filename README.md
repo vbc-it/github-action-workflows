@@ -23,9 +23,20 @@ Molecule runs the scenarios of the roles touched by the changeset:
 
 Requirements for calling repositories:
 
-- Grant `contents: read`, plus `pull-requests: read` for change detection on pull requests in private and internal repositories. All jobs except `discover` reduce the token to what they need; `discover` uses the token as the caller grants it.
+- Grant the minimum token permissions listed below.
 - The collection must have a committed `uv.lock` that matches `pyproject.toml`: dependencies are installed with `uv sync --locked`, which fails instead of re-resolving.
 - uv is pinned to `0.13.9` (the newest release whose checksum is built into the pinned `setup-uv`), which takes precedence over a `[tool.uv] required-version` in the caller's `pyproject.toml`.
+
+Minimum caller permissions:
+
+| Caller repository | `permissions:` on the calling job |
+|---|---|
+| public | `contents: read` |
+| internal or private | `contents: read` and `pull-requests: read` |
+
+- `pull-requests: read` is needed because `discover` reads the changed files of a pull request through the GitHub API (`dorny/paths-filter`). Without it, `discover` fails on `pull_request` events with "Resource not accessible by integration".
+- The reusable workflow requests no permissions of its own: a called workflow can never get more than its caller grants, and a job that asked for more would stop the whole run from starting. Every job except `discover` reduces the token further to what it needs (`contents: read` or nothing); `discover` uses the token as the caller grants it.
+- If the caller sets no `permissions:`, the repository or organisation default for `GITHUB_TOKEN` applies. Declare them explicitly so the run does not depend on that setting.
 
 Inputs:
 
