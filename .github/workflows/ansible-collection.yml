@@ -56,6 +56,13 @@ on:
         required: false
         default: 120
         type: number
+      test_all_roles_on_tag:
+        description: >-
+          Test all roles on tag runs, like force_all_roles. With false, tag runs
+          test only the roles changed by the tagged commit
+        required: false
+        default: true
+        type: boolean
       publish_runner:
         description: >-
           Runner label for the publish job. Automation Hub is only reachable from
@@ -309,15 +316,19 @@ jobs:
         run: uv sync --locked --dev
         working-directory: ${{ inputs.collection-path }}
 
-      # Tag runs test all roles: a release must not be published on an empty changeset.
+      # Tag runs test all roles (test_all_roles_on_tag): a release must not be
+      # published on an empty changeset.
       - name: Set test scope
         id: scope
         env:
           FORCE_ALL_ROLES: ${{ inputs.force_all_roles }}
+          TEST_ALL_ROLES_ON_TAG: ${{ inputs.test_all_roles_on_tag }}
         run: |
           if [[ "$FORCE_ALL_ROLES" == "true" ]]; then
             echo "all_roles=true" >> "$GITHUB_OUTPUT"
-          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "schedule" || "$GITHUB_REF_TYPE" == "tag" ]]; then
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            echo "all_roles=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF_TYPE" == "tag" && "$TEST_ALL_ROLES_ON_TAG" == "true" ]]; then
             echo "all_roles=true" >> "$GITHUB_OUTPUT"
           else
             echo "all_roles=false" >> "$GITHUB_OUTPUT"
