@@ -181,6 +181,9 @@ jobs:
         uses: your-org/github-action-workflows/.github/workflows/ansible-collection.yml@main
         secrets:
             automationhub_token: ${{ secrets.AUTOMATIONHUB_TOKEN }}
+            # Optional: for onepassword lookups and private Galaxy servers in Molecule
+            op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+            galaxy_server_token: ${{ secrets.GALAXY_SERVER_TOKEN }}
         with:
             platform: ubuntu-latest
             collection-path: tests/test_collection
@@ -190,6 +193,9 @@ jobs:
             # Optional: mirror Jenkins roleConfigs (unlisted roles still run all scenarios)
             molecule_scenarios: '{"ssh": ["default", "hostbased"], "certificate": []}'
             molecule_max_parallel: 4
+            molecule_lock_scenarios: '["certificate/create"]'
+            molecule_base_config: .config/molecule/ci.yml
+            ansible_config: .config/ansible.cfg
 ```
 
 This workflow is tested in this repo with the `test_collection` sample using `.github/workflows/test-self.yml`.
