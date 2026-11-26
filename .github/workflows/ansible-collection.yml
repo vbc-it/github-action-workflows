@@ -70,6 +70,14 @@ on:
         required: false
         default: 0
         type: number
+      molecule_lock_scenarios:
+        description: >-
+          JSON list of scenarios ("<role>/<scenario>" for legacy layouts, the Molecule
+          scenario name for native layouts) that must not run at the same time as the
+          same scenario in another run of this repository
+        required: false
+        default: '[]'
+        type: string
       molecule_base_config:
         description: 'Repository-relative path of a Molecule base config, passed as molecule --base-config'
         required: false
@@ -443,6 +451,7 @@ jobs:
           CHANGED_ROLES: ${{ steps.changed-roles.outputs.role_folders }}
           COLLECTION_PATH: ${{ inputs.collection-path }}
           MOLECULE_SCENARIOS: ${{ inputs.molecule_scenarios }}
+          MOLECULE_LOCK_SCENARIOS: ${{ inputs.molecule_lock_scenarios }}
         run: |
           # Role and scenario names come from directory names in the caller's
           # changeset and end up in the job matrix, so only plain names pass.
@@ -475,6 +484,13 @@ jobs:
                 exit 1
               fi
             done < <(jq -r 'keys[]' <<< "$selection")
+          fi
+
+          # molecule_lock_scenarios is read by the molecule job's concurrency
+          # expression; check it here for a clear error.
+          if ! jq -e 'type == "array" and all(.[]; type == "string")' <<< "${MOLECULE_LOCK_SCENARIOS:-[]}" > /dev/null 2>&1; then
+            echo '::error::molecule_lock_scenarios must be a JSON list of scenario names, e.g. ["certificate/create"]'
+            exit 1
           fi
 
           folders=()
@@ -678,6 +694,17 @@ jobs:
       fail-fast: false
       # 0 (the default) means no limit; a matrix has at most 256 jobs.
       max-parallel: ${{ inputs.molecule_max_parallel > 0 && inputs.molecule_max_parallel || 256 }}
+    # Scenarios in molecule_lock_scenarios share one group per repository, role and
+    # scenario, so runs of the same scenario wait for each other (GitHub keeps only
+    # the newest pending job of a group and cancels older pending ones). Every
+    # other job gets a group of its own and is never held back.
+    concurrency:
+      group: >-
+        ${{ contains(fromJSON(inputs.molecule_lock_scenarios), matrix.is_native && matrix.scenario || format('{0}/{1}', matrix.role, matrix.scenario))
+        && format('molecule-lock-{0}-{1}-{2}', github.repository, matrix.role, matrix.scenario)
+        || format('molecule-{0}-{1}-{2}-{3}-{4}-{5}-{6}', github.run_id, github.run_attempt,
+                  inputs.collection-path, inputs.platform, matrix.is_native, matrix.role, matrix.scenario) }}
+      cancel-in-progress: false
     permissions:
       contents: read
     steps:

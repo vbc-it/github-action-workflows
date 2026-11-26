@@ -18,6 +18,8 @@ jobs:
       # multi_scenario runs only "second"; single_scenario is unlisted and
       # still runs all its scenarios.
       molecule_scenarios: '{"multi_scenario": ["second"]}'
+      # Run test-self twice at once to see this scenario wait for the other run.
+      molecule_lock_scenarios: '["single_scenario/default"]'
       # Checked by resources/verify.yml of the fixture.
       molecule_base_config: tests/ansible_collections/legacy_collection/resources/molecule-base.yml
       ansible_config: tests/ansible_collections/legacy_collection/resources/ansible.cfg
