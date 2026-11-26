@@ -583,10 +583,18 @@ jobs:
 
       - name: Run molecule tests for role ${{ matrix.role }} scenario ${{ matrix.scenario }}
         run: |
+          # shellcheck disable=SC1090
           source "$GITHUB_WORKSPACE/$COLLECTION_PATH/.venv/bin/activate"
+          # Unique per run attempt and scenario, so parallel jobs on one host
+          # don't share container, network or external names. Set before
+          # molecule_env_file, which may override it.
+          INSTANCE_ID=$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ROLE}-${SCENARIO}" | sha1sum | cut -c1-16)
+          export INSTANCE_ID
           if [[ -n "$MOLECULE_ENV_FILE" ]]; then
+            # shellcheck disable=SC1090
             set -a && source "$MOLECULE_ENV_FILE" && set +a
           fi
+          echo "INSTANCE_ID=${INSTANCE_ID}"
           molecule --version
           # required because with shared_state dependency is not executed before create scenario, but create needs dependencies to be installed
           molecule dependency --scenario-name "$SCENARIO"
@@ -596,6 +604,7 @@ jobs:
         env:
           COLLECTION_PATH: ${{ inputs.collection-path }}
           MOLECULE_ENV_FILE: ${{ inputs.molecule_env_file }}
+          ROLE: ${{ matrix.role }}
           SCENARIO: ${{ matrix.scenario }}
           PY_COLORS: '1'
           ANSIBLE_FORCE_COLOR: '1'
