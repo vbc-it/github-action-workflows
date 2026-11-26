@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Unit tests for the "Discover scenarios for each role" step of
-# .github/workflows/ansible-collection.yml. The step script is extracted from
+# Unit tests for the "Discover scenarios for each role" and "Remove checkout
+# credentials" steps of the discover job in
+# .github/workflows/ansible-collection.yml. The step scripts are extracted from
 # the workflow and run against the fixture collections, like the runner does.
 #
-# Needs bash 4+, jq, uv and synced fixture environments:
+# Needs bash 4+ (first in PATH), jq, git, uv and synced fixture environments:
 #   (cd tests/ansible_collections/legacy_collection && uv sync --locked --dev)
 #   (cd tests/ansible_collections/native_collection && uv sync --locked --dev)
 # Run from anywhere: tests/discover/test_discover.sh
@@ -18,14 +19,20 @@ unset VIRTUAL_ENV
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-"$legacy/.venv/bin/python" -I - .github/workflows/ansible-collection.yml > "$work/discover.sh" <<'PY'
+# Writes discover.sh and remove-credentials.sh to $work.
+"$legacy/.venv/bin/python" -I - .github/workflows/ansible-collection.yml "$work" <<'PY'
 import sys
 import yaml
 
 with open(sys.argv[1], encoding="utf-8") as f:
     workflow = yaml.safe_load(f)
 steps = workflow["jobs"]["discover"]["steps"]
-print(next(s for s in steps if s.get("id") == "discover-scenarios")["run"])
+for key, value, out in (
+    ("id", "discover-scenarios", "discover.sh"),
+    ("name", "Remove checkout credentials", "remove-credentials.sh"),
+):
+    with open(f"{sys.argv[2]}/{out}", "w", encoding="utf-8") as f:
+        f.write(next(s for s in steps if s.get(key) == value)["run"])
 PY
 
 # Same script with "molecule list" replaced by a stub that prints $FAKE_OUTPUT
@@ -148,6 +155,50 @@ run_case "lock: list of names accepted" "$work/discover.sh" 0 "single_scenario/d
 run_case "lock: not a list fails" "$work/discover.sh" fail "" \
   'MOLECULE_LOCK_SCENARIOS={"single_scenario": "default"}'
 run_case "lock: invalid JSON fails" "$work/discover.sh" fail "" 'MOLECULE_LOCK_SCENARIOS=["x"'
+
+# Issue #27: credentials as actions/checkout v6+ stores them are removed.
+# cred_case <name> <want: removed|fail> [extra setup command] [extra check command]
+cred_case() {
+  local name=$1 want=$2 setup=${3:-} check=${4:-true} repo_dir="$work/cred-repo" tmp="$work/runner-temp" rc=0 cred left
+  rm -rf "$repo_dir" "$tmp"
+  mkdir -p "$tmp"
+  git init -q "$repo_dir"
+  # includeIf.gitdir matches the resolved path (/var -> /private/var on macOS).
+  repo_dir=$(cd "$repo_dir" && pwd -P)
+  cred="$tmp/git-credentials-0123abcd-4567-89ef-0123-456789abcdef.config"
+  git config -f "$cred" http.https://github.com/.extraheader 'AUTHORIZATION: basic c2VjcmV0'
+  git -C "$repo_dir" config "includeIf.gitdir:$repo_dir/.git.path" "$cred"
+  git -C "$repo_dir" config "includeIf.gitdir:$repo_dir/.git/worktrees/*.path" "$cred"
+  git -C "$repo_dir" config includeIf.gitdir:/github/workspace/.git.path "/github/runner_temp/${cred##*/}"
+  git -C "$repo_dir" config http.https://github.com/.extraheader 'AUTHORIZATION: basic b2xk'
+  git -C "$repo_dir" config core.unrelated keep
+  [[ -n "$setup" ]] && (cd "$repo_dir" && eval "$setup")
+  if ! git -C "$repo_dir" config --get-regexp '^http\..*\.extraheader$' | grep -q c2VjcmV0; then
+    echo "FAIL $name: test setup does not resolve the credentials"; failures=$((failures + 1)); return
+  fi
+  (cd "$repo_dir" && env RUNNER_TEMP="$tmp" GITHUB_SERVER_URL=https://github.com \
+    bash --noprofile --norc -eo pipefail "$work/remove-credentials.sh") > "$work/log" 2>&1 || rc=$?
+  if [[ "$want" == fail ]]; then
+    if [[ $rc -eq 0 ]]; then
+      echo "FAIL $name: expected a failure"; cat "$work/log"; failures=$((failures + 1)); return
+    fi
+    echo "ok   $name (failed as expected: $(grep -m1 '::error::' "$work/log"))"
+    return
+  fi
+  left=$(git -C "$repo_dir" config --list --show-origin | grep -iE 'extraheader|git-credentials' || true)
+  if [[ $rc -ne 0 || -n "$left" || -e "$cred" ]] || ! git -C "$repo_dir" config core.unrelated > /dev/null \
+    || ! (cd "$repo_dir" && eval "$check"); then
+    echo "FAIL $name: rc=$rc, left: [$left], file exists: $([[ -e "$cred" ]] && echo yes || echo no)"
+    cat "$work/log"; failures=$((failures + 1)); return
+  fi
+  echo "ok   $name"
+}
+cred_case "credentials: includeIf entries, file and extraheader removed" removed
+cred_case "credentials: unrelated includeIf kept" removed \
+  "git config includeIf.gitdir:/elsewhere/.git.path /elsewhere/other.config" \
+  "git config includeIf.gitdir:/elsewhere/.git.path > /dev/null"
+cred_case "credentials: an extraheader from another file fails" fail \
+  "git config -f other.config http.https://example.com/.extraheader x && git config include.path \"\$PWD/other.config\""
 
 if [[ $failures -ne 0 ]]; then
   echo "$failures case(s) failed"

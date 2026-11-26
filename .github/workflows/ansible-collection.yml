@@ -399,21 +399,13 @@ jobs:
     outputs:
       role_scenarios: ${{ steps.discover-scenarios.outputs.role_scenarios }}
     steps:
-      # Credentials stay in .git/config here: dorny/paths-filter runs git fetch
-      # on push events, which needs them for private and internal repositories.
+      # Credentials are kept only until the changeset is known: dorny/paths-filter
+      # runs git fetch on push events, which needs them for private and internal
+      # repositories. "Remove checkout credentials" drops them before any code of
+      # the calling repository (uv sync, molecule list) runs.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: true  # zizmor: ignore[artipacked]
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
-        with:
-          # Newest version whose checksum is built into this setup-uv release.
-          version: "0.13.9"
-
-      - name: Sync dependencies with uv
-        run: uv sync --locked --dev
-        working-directory: ${{ inputs.collection-path }}
 
       # Tag runs test all roles (test_all_roles_on_tag): a release must not be
       # published on an empty changeset.
@@ -503,6 +495,39 @@ jobs:
             mapfile -t folders < <(find "$COLLECTION_PATH/roles" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
           fi
           echo "role_folders=${folders[*]}" >> "$GITHUB_OUTPUT"
+
+      # actions/checkout v6+ stores the token in $RUNNER_TEMP/git-credentials-<uuid>.config,
+      # included from .git/config through includeIf.gitdir entries (one for the
+      # host path, one for the container path /github/workspace, each also for
+      # worktrees); older versions write http.<server>/.extraheader directly.
+      # Remove both, then fail if git still resolves an extraheader.
+      - name: Remove checkout credentials
+        run: |
+          git config --local --unset-all "http.$GITHUB_SERVER_URL/.extraheader" || true
+          while IFS= read -r -d '' entry; do
+            key=${entry%%$'\n'*}
+            value=${entry#*$'\n'}
+            if [[ "$value" =~ git-credentials-[0-9A-Fa-f-]+\.config$ ]]; then
+              git config --local --fixed-value --unset-all "$key" "$value"
+            fi
+          done < <(git config --local -z --get-regexp '^includeif\.' || true)
+          # The container entries name the same file under /github/runner_temp.
+          rm -f "$RUNNER_TEMP"/git-credentials-*.config
+          if git config --get-regexp '^http\..*\.extraheader$' > /dev/null; then
+            echo "::error::git still has an http extraheader after removing the checkout credentials"
+            git config --list --show-origin --name-only >&2
+            exit 1
+          fi
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          # Newest version whose checksum is built into this setup-uv release.
+          version: "0.13.9"
+
+      - name: Sync dependencies with uv
+        run: uv sync --locked --dev
+        working-directory: ${{ inputs.collection-path }}
 
       - name: Discover scenarios for each role
         id: discover-scenarios
