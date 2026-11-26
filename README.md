@@ -62,7 +62,8 @@ Inputs:
 - `ansible_config` (string, default: `''`): repository-relative path of an `ansible.cfg`, exported as `ANSIBLE_CONFIG` before `molecule_env_file` is sourced. It applies to `molecule dependency` (`ansible-galaxy`, e.g. private Galaxy or Automation Hub servers) and to commands outside Molecule's provisioner; the playbooks Molecule runs use the `ansible.cfg` Molecule generates, so use `provisioner.config_options` in `molecule.yml` or the base config for those
 - `build_collection` (boolean, default: `true`): build the collection tarball on every run with a fixed `ansible-core` release (no code from the repository runs) and upload it as an artifact; `check` needs this job, so a broken `galaxy.yml` or `build_ignore` fails CI. Set `false` to skip it
 - `test_reports` (boolean, default: `true`): each Molecule job sets `PYTEST_ADDOPTS=--junit-xml=...` (appended after `molecule_env_file`, so the testinfra verifier writes a report; other verifiers ignore it), uploads the report as `junit-molecule-<role>-<scenario>-...` even when the job fails, and adds a short table to the job summary. Each sanity job uploads `tests/output/junit/` from `ansible-test sanity --junit` as `junit-sanity-<namespace>-<name>-<branch>-...`. Nothing is published as a check run, so no `checks: write` is needed. If a scenario's verifier sets its own `--junit-xml`, the flag that pytest reads last wins
-- `test_all_roles_on_tag` (boolean, default: `true`): tag runs test all roles, like `force_all_roles`. With `false`, tag runs select roles from the changeset like branch pushes, so a release can be published with no Molecule scenario run
+- `test_all_roles_on_tag` (boolean, default: `true`): tag runs test all roles, like `force_all_roles`. With `false`, tag runs select roles from the changeset like branch pushes, so a release can be published with no Molecule scenario run. Because of that, a tag run with `publish_to_automationhub: true` and `test_all_roles_on_tag: false` (and `force_all_roles: false`, not `workflow_dispatch`) fails in `validate-release` unless `allow_untested_publish` is `true`
+- `allow_untested_publish` (boolean, default: `false`): accept publishing on tag runs that do not test all roles (see `test_all_roles_on_tag`). `validate-release` then emits a warning and a job summary note instead of failing
 
 Secrets:
 
@@ -82,6 +83,7 @@ Tag validation:
 
 - When `publish_to_automationhub=true` and the workflow runs on a tag, CI validates that the tag version matches `galaxy.yml` `version` (supports tag names like `1.2.3` and `v1.2.3`).
 - If the versions do not match, the workflow fails before test jobs continue.
+- It also fails when Molecule would not test all roles (`test_all_roles_on_tag: false` without `force_all_roles`), unless `allow_untested_publish: true`.
 
 Caching:
 
