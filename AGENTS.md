@@ -6,6 +6,7 @@ Guidance for coding agents working in this repository.
 
 - This repository provides reusable GitHub Actions workflows for Ansible collection CI.
 - Primary workflow under development is [ansible-collection](.github/workflows/ansible-collection.yml).
+- [container-image](.github/workflows/container-image.yml) builds one image with `docker build`, pushes it with `skopeo` and optionally launches an AAP job template. Its fixture is `tests/container_image`; pushing and the AAP launch are not covered by the self-test.
 - Self-test entrypoint is [test-self](.github/workflows/test-self.yml).
 
 ## First Files To Read
