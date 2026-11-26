@@ -1,14 +1,23 @@
 repos:
+  # Hook revisions are pinned to commit SHAs (pre-commit autoupdate --freeze).
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
+    rev: 2c9f875913ee60ca25ce70243dc24d5b6415598c  # frozen: v4.6.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
         args:
           - --allow-multiple-documents
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: c7d31dc612dffdd4d3b2f2b88b9660d3ab057ee8  # frozen: v1.33.1
+    hooks:
+      - id: zizmor
+        args:
+          - --no-progress
+          - --offline
+          - --min-severity=low
   - repo: https://github.com/ansible/ansible-lint
-    rev: v26.4.0
+    rev: b74fb6f73d234bf92672372cb1c10768e4018d16  # frozen: v26.11.0
     hooks:
       - id: ansible-lint
         args:

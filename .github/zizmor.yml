@@ -1,0 +1,7 @@
+# zizmor configuration, used by the pre-commit hook and in CI.
+rules:
+  # Suggests the "$/" self-reference syntax for local reusable workflows;
+  # test-self.yml keeps the "./" form that GitHub documents for calling a
+  # workflow in the same repository.
+  self-repository:
+    disable: true
