@@ -9,7 +9,7 @@ Reusable GitHub Actions workflows for Ansible collection CI.
 Runs:
 
 - `pre-commit` and `ansible-lint`
-- Ansible `sanity` tests (default: stable `2.16`, `2.17`, `2.18`; set `sanity_ansible_versions`)
+- Ansible `sanity` tests (default: stable `2.16`, `2.17`, `2.18`; set `sanity_ansible_versions`), run with `ansible-test sanity --docker default` against the newest PyPI release of each `ansible-core` branch
 - Molecule tests for discovered role/scenario combinations
 
 `pre-commit`, `ansible-lint`, `sanity` and Molecule discovery start in parallel once `validate-release` passes, so Molecule doesn't wait for lint and sanity. The `check` job aggregates all of them and gates publishing.
