@@ -87,6 +87,13 @@ on:
       aap_password:
         description: 'Password of aap_username'
         required: false
+    outputs:
+      digest:
+        description: 'Manifest digest of the pushed image; empty when push is false'
+        value: ${{ jobs.build.outputs.digest }}
+      image_ref:
+        description: 'Pushed image as <registry>/<namespace>/<image>@<digest>; empty when push is false'
+        value: ${{ jobs.build.outputs.image_ref }}
 
 jobs:
 
@@ -95,6 +102,9 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      image_ref: ${{ steps.push.outputs.image_ref }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -107,16 +117,24 @@ jobs:
           IMAGE: ${{ inputs.image }}
         run: |
           build="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(printf '%s' "$IMAGE" | sha256sum | cut -c1-12)"
-          echo "LOCAL_IMAGE=localhost/container-image:${build}" >> "$GITHUB_ENV"
-          echo "REGISTRY_AUTH_FILE=${RUNNER_TEMP}/registry-auth-${build}.json" >> "$GITHUB_ENV"
+          {
+            echo "LOCAL_IMAGE=localhost/container-image:${build}"
+            echo "IMAGE_ID_FILE=${RUNNER_TEMP}/image-id-${build}"
+            echo "REGISTRY_AUTH_FILE=${RUNNER_TEMP}/registry-auth-${build}.json"
+          } >> "$GITHUB_ENV"
 
       - name: Build image
         env:
           CONTEXT: ${{ inputs.context }}
           DOCKERFILE: ${{ inputs.dockerfile }}
           BUILD_ARGS: ${{ inputs.build_args }}
+          PUSH: ${{ inputs.push }}
         run: |
           arguments=()
+          # Another job on a shared docker daemon could have poisoned the build cache.
+          if [[ "$PUSH" == "true" ]]; then
+            arguments+=(--no-cache)
+          fi
           while IFS= read -r build_arg; do
             if [[ -n "$build_arg" ]]; then
               arguments+=(--build-arg "$build_arg")
@@ -128,10 +146,12 @@ jobs:
             --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
             "${arguments[@]}" \
+            --iidfile "$IMAGE_ID_FILE" \
             --tag "$LOCAL_IMAGE" \
             "$CONTEXT"
 
       - name: Push image
+        id: push
         if: ${{ inputs.push }}
         env:
           REGISTRY: ${{ inputs.registry }}
@@ -145,22 +165,49 @@ jobs:
             exit 1
           fi
 
+          # Push by the content-addressed image ID: another job on a shared docker daemon can retag LOCAL_IMAGE.
+          image_id=$(cat "$IMAGE_ID_FILE")
+          if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "docker build wrote no valid image ID to ${IMAGE_ID_FILE}." >&2
+            exit 1
+          fi
+
           skopeo login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin <<< "$REGISTRY_PASSWORD"
 
+          # The first tag is pushed from the daemon; later tags copy that manifest by digest within the registry.
+          digest=''
+          digest_file="${IMAGE_ID_FILE}.digest"
           while IFS= read -r tag; do
             if [[ -z "$tag" ]]; then
               continue
             fi
 
-            skopeo copy "docker-daemon:${LOCAL_IMAGE}" "docker://${REPOSITORY}:${tag}"
+            if [[ -z "$digest" ]]; then
+              skopeo copy --digestfile "$digest_file" "docker-daemon:${image_id}" "docker://${REPOSITORY}:${tag}"
+              digest=$(cat "$digest_file")
+            else
+              skopeo copy --digestfile "$digest_file" "docker://${REPOSITORY}@${digest}" "docker://${REPOSITORY}:${tag}"
+              if [[ "$(cat "$digest_file")" != "$digest" ]]; then
+                echo "${REPOSITORY}:${tag} got digest $(cat "$digest_file") instead of ${digest}." >&2
+                exit 1
+              fi
+            fi
             echo "Pushed \`${REPOSITORY}:${tag}\`" >> "$GITHUB_STEP_SUMMARY"
           done <<< "$TAGS"
+
+          if [[ -z "$digest" ]]; then
+            echo "No tag to push." >&2
+            exit 1
+          fi
+          echo "Digest: \`${REPOSITORY}@${digest}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${REPOSITORY}@${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Remove local image and registry credentials
         if: ${{ always() }}
         run: |
           docker image rm --force "$LOCAL_IMAGE" || true
-          rm -f "$REGISTRY_AUTH_FILE"
+          rm -f "$REGISTRY_AUTH_FILE" "$IMAGE_ID_FILE" "${IMAGE_ID_FILE}.digest"
 
   deploy:
     needs: build
