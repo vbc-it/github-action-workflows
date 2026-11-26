@@ -20,6 +20,7 @@ Molecule runs the scenarios of the roles touched by the changeset:
 - Other files under `extensions/molecule/` (shared `config.yml`, inventory, `default` scenario), the `molecule_env_file`, and files matching `molecule_all_roles_paths` select all roles.
 - `schedule`, `workflow_dispatch` and tag runs, and `force_all_roles: true`, test all roles. Tag runs always test everything so a release is never published on an empty changeset.
 - Role and scenario directory names must be plain names (`^[A-Za-z0-9_]+$` for roles); discovery fails on anything else.
+- Discovery runs `molecule list` with colours off (`NO_COLOR=1`, `PY_COLORS=0`, `FORCE_COLOR`, `CLICOLOR_FORCE` and `ANSIBLE_FORCE_COLOR` unset) and strips ANSI codes before parsing. It fails when a selected role has a `molecule/` directory (or `extensions/molecule/` exists) and `molecule list` succeeds but no scenario can be parsed, instead of passing with no tests run. A role whose `molecule/` holds no scenario at all (`glob failed`) is still skipped, and a run that selects no role still skips Molecule.
 - Each Molecule job exports `INSTANCE_ID`, the first 16 hex characters of the SHA-1 of `<run_id>-<run_attempt>-<role>-<scenario>`. Use it in `molecule.yml` (e.g. `name: instance-${INSTANCE_ID:-local}`) or for external names so parallel jobs on one host don't collide. It is set before `molecule_env_file` is sourced, so that file can override it.
 
 Requirements for calling repositories:

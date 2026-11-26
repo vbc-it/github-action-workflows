@@ -407,6 +407,16 @@ jobs:
           role_re='^[A-Za-z0-9_]+$'
           scenario_re='^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)?$'
 
+          # The "Scenario Name:" parser below needs plain text: coloured output
+          # (PY_COLORS, FORCE_COLOR, a colour TERM) would silently yield no scenarios.
+          unset FORCE_COLOR CLICOLOR_FORCE ANSIBLE_FORCE_COLOR
+          export NO_COLOR=1 PY_COLORS=0 ANSIBLE_NOCOLOR=1
+          # Strip ANSI CSI and OSC sequences and carriage returns in case a tool ignores the above.
+          strip_ansi() {
+            local esc=$'\033' bel=$'\007' cr=$'\r'
+            sed -E "s#${esc}\[[0-9;:?]*[ -/]*[@-~]##g; s#${esc}\][^${esc}${bel}]*(${bel}|${esc}\\\\)##g; s#${cr}##g"
+          }
+
           folders=()
           if [[ "$ALL_ROLES" == "true" ]]; then
             read -r -a folders <<< "$LISTED_ROLES"
@@ -441,6 +451,7 @@ jobs:
             legacy_output=$(cd "$role_path" && uv run molecule list -f yaml 2>&1)
             legacy_rc=$?
             set -e
+            legacy_output=$(strip_ansi <<< "$legacy_output")
 
             if [[ "$legacy_rc" -ne 0 ]]; then
               if echo "$legacy_output" | grep -q "glob failed"; then
@@ -457,6 +468,11 @@ jobs:
                 | sed '/^$/d' \
                 | sort -u
             )
+            if [[ ${#legacy_scenarios[@]} -eq 0 ]]; then
+              echo "$legacy_output" >&2
+              echo "::error::roles/$role/molecule exists and molecule list succeeded, but no scenario could be parsed from its output"
+              exit 1
+            fi
 
             for scenario_name in "${legacy_scenarios[@]}"; do
               if [[ "$scenario_name" == "$role/"* ]]; then
@@ -487,6 +503,7 @@ jobs:
             native_output=$(cd "$COLLECTION_PATH" && uv run molecule list -f yaml 2>&1)
             native_rc=$?
             set -e
+            native_output=$(strip_ansi <<< "$native_output")
 
             if [[ "$native_rc" -ne 0 ]]; then
               if ! echo "$native_output" | grep -q "glob failed"; then
@@ -500,6 +517,11 @@ jobs:
                   | sed '/^$/d' \
                   | sort -u
               )
+              if [[ ${#native_scenarios[@]} -eq 0 ]]; then
+                echo "$native_output" >&2
+                echo "::error::extensions/molecule exists and molecule list succeeded, but no scenario could be parsed from its output"
+                exit 1
+              fi
 
               for full_scenario in "${native_scenarios[@]}"; do
                 full_scenario="$(printf '%s' "$full_scenario" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"

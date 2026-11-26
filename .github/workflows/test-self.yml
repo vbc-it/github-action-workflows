@@ -16,6 +16,41 @@ jobs:
       collection-path: tests/ansible_collections/legacy_collection
       force_all_roles: true
 
+  # Pull request path: changeset detection instead of force_all_roles, with
+  # the minimum permissions documented for internal and private callers.
+  ansible-collection-legacy-changeset:
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/ansible-collection.yml
+    with:
+      platform: ubuntu-latest
+      collection-path: tests/ansible_collections/legacy_collection
+
+  # Unit tests of the discover step script, including the cases that must
+  # fail discover (which a call of the reusable workflow cannot assert).
+  discover-logic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: "0.13.9"
+
+      - name: Sync fixture dependencies
+        run: |
+          (cd tests/ansible_collections/legacy_collection && uv sync --locked --dev)
+          (cd tests/ansible_collections/native_collection && uv sync --locked --dev)
+
+      - name: Run discover tests
+        run: tests/discover/test_discover.sh
+
   ansible-collection-native:
     uses: ./.github/workflows/ansible-collection.yml
     with:

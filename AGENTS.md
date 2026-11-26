@@ -29,6 +29,8 @@ Run from repository root unless noted otherwise.
   - `cd tests/ansible_collections/legacy_collection/roles/<role> && uv run molecule list -f yaml`
 - Molecule scenario discovery (native collection root):
   - `cd tests/ansible_collections/native_collection && uv run molecule list -f yaml`
+- Discover step unit tests (needs bash 4+, jq and both fixtures synced):
+  - `tests/discover/test_discover.sh`
 
 ## Repository Conventions
 
