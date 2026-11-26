@@ -408,7 +408,9 @@ jobs:
           persist-credentials: true  # zizmor: ignore[artipacked]
 
       # Tag runs test all roles (test_all_roles_on_tag): a release must not be
-      # published on an empty changeset.
+      # published on an empty changeset. merge_group runs test all roles because
+      # github.ref (the paths-filter base) is the merge queue head itself, which
+      # would give an empty changeset.
       - name: Set test scope
         id: scope
         env:
@@ -417,7 +419,7 @@ jobs:
         run: |
           if [[ "$FORCE_ALL_ROLES" == "true" ]]; then
             echo "all_roles=true" >> "$GITHUB_OUTPUT"
-          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+          elif [[ "$GITHUB_EVENT_NAME" =~ ^(workflow_dispatch|schedule|merge_group)$ ]]; then
             echo "all_roles=true" >> "$GITHUB_OUTPUT"
           elif [[ "$GITHUB_REF_TYPE" == "tag" && "$TEST_ALL_ROLES_ON_TAG" == "true" ]]; then
             echo "all_roles=true" >> "$GITHUB_OUTPUT"
@@ -465,6 +467,13 @@ jobs:
 
           all_roles=false
           folders=()
+          # The GitHub API lists at most 3000 files of a pull request, without an
+          # error, so a list of that length may be truncated.
+          changed_count=$(jq 'length' <<< "${CHANGED_FILES:-[]}")
+          if [[ "$changed_count" -ge 3000 ]]; then
+            echo "::warning::The changeset lists $changed_count files and may be truncated (GitHub API limit); testing all roles"
+            all_roles=true
+          fi
           while IFS= read -r f; do
             if [[ -n "$prefix" && "$prefix" != "." ]]; then
               [[ "$f" == "$prefix/"* ]] || continue
@@ -495,6 +504,7 @@ jobs:
             mapfile -t folders < <(find "$COLLECTION_PATH/roles" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
           fi
           echo "role_folders=${folders[*]}" >> "$GITHUB_OUTPUT"
+          echo "all_roles=$all_roles" >> "$GITHUB_OUTPUT"
 
       # actions/checkout v6+ stores the token in $RUNNER_TEMP/git-credentials-<uuid>.config,
       # included from .git/config through includeIf.gitdir entries (one for the
@@ -535,6 +545,7 @@ jobs:
           ALL_ROLES: ${{ steps.scope.outputs.all_roles }}
           LISTED_ROLES: ${{ steps.list-roles.outputs.role_folders }}
           CHANGED_ROLES: ${{ steps.changed-roles.outputs.role_folders }}
+          CHANGED_ALL_ROLES: ${{ steps.changed-roles.outputs.all_roles }}
           COLLECTION_PATH: ${{ inputs.collection-path }}
           MOLECULE_SCENARIOS: ${{ inputs.molecule_scenarios }}
           MOLECULE_LOCK_SCENARIOS: ${{ inputs.molecule_lock_scenarios }}
@@ -601,6 +612,17 @@ jobs:
 
           role_scenarios_json='[]'
           json_items=""
+          skipped=()
+
+          # "glob failed" is Molecule's error for a directory without any
+          # molecule.yml. It is a skip only when that is really the case; any
+          # other failure of molecule list fails discover.
+          # has_molecule_yml <dir> <find args>
+          has_molecule_yml() {
+            local dir=$1
+            shift
+            [[ -n "$(find "$dir" "$@" -name molecule.yml -print -quit)" ]]
+          }
 
           # Legacy collection: discover scenarios by running Molecule inside each selected role.
           for role in "${unique_folders[@]}"; do
@@ -616,12 +638,16 @@ jobs:
             legacy_output=$(strip_ansi <<< "$legacy_output")
 
             if [[ "$legacy_rc" -ne 0 ]]; then
-              if echo "$legacy_output" | grep -q "glob failed"; then
+              echo "$legacy_output" >&2
+              # Molecule's default glob for a role: molecule/*/molecule.yml
+              if grep -q "glob failed" <<< "$legacy_output" \
+                && ! has_molecule_yml "$role_path/molecule" -mindepth 2 -maxdepth 2; then
+                echo "::warning::roles/$role/molecule contains no scenario (no molecule/*/molecule.yml); skipping the role"
+                skipped+=("roles/$role/molecule: no scenario")
                 continue
-              else
-                echo "$legacy_output" >&2
-                exit "$legacy_rc"
               fi
+              echo "::error::molecule list failed in roles/$role (exit code $legacy_rc)"
+              exit "$legacy_rc"
             fi
 
             mapfile -t legacy_scenarios < <(
@@ -668,8 +694,14 @@ jobs:
             native_output=$(strip_ansi <<< "$native_output")
 
             if [[ "$native_rc" -ne 0 ]]; then
-              if ! echo "$native_output" | grep -q "glob failed"; then
-                echo "$native_output" >&2
+              echo "$native_output" >&2
+              # Molecule's collection glob: extensions/molecule/**/molecule.yml
+              if grep -q "glob failed" <<< "$native_output" \
+                && ! has_molecule_yml "$COLLECTION_PATH/extensions/molecule"; then
+                echo "::warning::extensions/molecule contains no scenario (no molecule.yml); skipping native scenarios"
+                skipped+=("extensions/molecule: no scenario")
+              else
+                echo "::error::molecule list failed in the collection root (exit code $native_rc)"
                 exit "$native_rc"
               fi
             else
@@ -705,8 +737,14 @@ jobs:
                 if [[ -z "$role" || -z "$scenario" ]]; then
                   continue
                 fi
-                # Keep only role scenarios that are part of the selected/changed roles.
-                if ! printf "%s\n" "${unique_folders[@]}" | grep -Fxq "$role"; then
+                if [[ -d "$COLLECTION_PATH/roles/$role" ]]; then
+                  # Keep only role scenarios that are part of the selected/changed roles.
+                  if ! printf "%s\n" "${unique_folders[@]}" | grep -Fxq "$role"; then
+                    continue
+                  fi
+                elif [[ "$ALL_ROLES" != "true" && "$CHANGED_ALL_ROLES" != "true" ]]; then
+                  # A scenario whose top folder is no role runs with all roles:
+                  # a change to its files selects all roles.
                   continue
                 fi
                 if [[ ! "$scenario" =~ $scenario_re ]]; then
@@ -726,6 +764,17 @@ jobs:
 
           if [[ -n "$json_items" ]]; then
             role_scenarios_json=$(printf "%s" "$json_items" | jq -c -s 'unique_by([.role, .scenario, .is_native])')
+          fi
+
+          # Selected roles that have no scenario at all run no test; make them visible.
+          untested=()
+          for role in "${unique_folders[@]}"; do
+            if ! jq -e --arg r "$role" 'any(.[]; .role == $r)' <<< "$role_scenarios_json" > /dev/null; then
+              untested+=("$role")
+            fi
+          done
+          if [[ ${#untested[@]} -gt 0 ]]; then
+            echo "::notice::Selected roles without a Molecule scenario (not tested): ${untested[*]}"
           fi
 
           # Apply molecule_scenarios. A listed scenario matches the discovered
@@ -768,6 +817,20 @@ jobs:
             echo "Found $count role-scenario combination(s):"
             echo "$role_scenarios_json" | jq -r '.[] | "  - " + (if .is_native then .scenario else (.role + "/" + .scenario) end) + " [native=\(.is_native)]"'
           fi
+
+          {
+            echo "### Molecule discovery"
+            echo
+            echo "- Selected roles (${#unique_folders[@]}): ${unique_folders[*]:-none}"
+            echo "- Scenarios to run: $count"
+            echo "$role_scenarios_json" | jq -r '.[] | "  - `" + (if .is_native then .scenario else (.role + "/" + .scenario) end) + "`"'
+            if [[ ${#untested[@]} -gt 0 ]]; then
+              echo "- Selected roles without a scenario (not tested): ${untested[*]}"
+            fi
+            for s in "${skipped[@]}"; do
+              echo "- Skipped $s"
+            done
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
   molecule:  # zizmor: ignore[excessive-permissions]
     needs: discover

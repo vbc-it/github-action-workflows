@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Unit tests for the "Discover scenarios for each role" and "Remove checkout
-# credentials" steps of the discover job in
+# Unit tests for the "Discover scenarios for each role", "Select roles from
+# changeset" and "Remove checkout credentials" steps of the discover job in
 # .github/workflows/ansible-collection.yml. The step scripts are extracted from
 # the workflow and run against the fixture collections, like the runner does.
 #
@@ -19,7 +19,7 @@ unset VIRTUAL_ENV
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# Writes discover.sh and remove-credentials.sh to $work.
+# Writes discover.sh, changed-roles.sh and remove-credentials.sh to $work.
 "$legacy/.venv/bin/python" -I - .github/workflows/ansible-collection.yml "$work" <<'PY'
 import sys
 import yaml
@@ -29,6 +29,7 @@ with open(sys.argv[1], encoding="utf-8") as f:
 steps = workflow["jobs"]["discover"]["steps"]
 for key, value, out in (
     ("id", "discover-scenarios", "discover.sh"),
+    ("id", "changed-roles", "changed-roles.sh"),
     ("name", "Remove checkout credentials", "remove-credentials.sh"),
 ):
     with open(f"{sys.argv[2]}/{out}", "w", encoding="utf-8") as f:
@@ -68,8 +69,9 @@ run_case() {
   shift 4
   local out="$work/output" log="$work/log" rc=0 ids=""
   : > "$out"
-  env GITHUB_OUTPUT="$out" ALL_ROLES=false LISTED_ROLES= CHANGED_ROLES= \
-    COLLECTION_PATH="$legacy" FAKE_MOLECULE="$work/fake-molecule" "$@" \
+  : > "$work/summary"
+  env GITHUB_OUTPUT="$out" GITHUB_STEP_SUMMARY="$work/summary" ALL_ROLES=false LISTED_ROLES= CHANGED_ROLES= \
+    CHANGED_ALL_ROLES= COLLECTION_PATH="$legacy" FAKE_MOLECULE="$work/fake-molecule" "$@" \
     bash --noprofile --norc -eo pipefail "$script" > "$log" 2>&1 || rc=$?
   if [[ "$want_rc" == fail ]]; then
     if [[ $rc -eq 0 ]]; then
@@ -109,8 +111,44 @@ run_case "parser strips ANSI colour codes" "$work/discover-fake.sh" 0 \
   "single_scenario/default single_scenario/second" CHANGED_ROLES=single_scenario FAKE_OUTPUT="$work/colour.txt"
 run_case "no parseable scenario fails" "$work/discover-fake.sh" fail "" \
   CHANGED_ROLES=single_scenario FAKE_OUTPUT="$work/garbage.txt"
-run_case "glob failed is skipped" "$work/discover-fake.sh" 0 "" \
+
+# Issue #28: glob failed is a skip only without any molecule.yml; native
+# scenarios whose top folder is no role run with all roles.
+# Copies of the fixtures reuse the synced environments.
+uv_env() { echo "UV_PROJECT_ENVIRONMENT=$repo/$1/.venv"; }
+mkdir -p "$work/legacy" "$work/native" "$work/native-empty"
+cp -R "$legacy/." "$work/legacy/" && rm -rf "$work/legacy/.venv"
+mkdir -p "$work/legacy/roles/no_scenario/molecule/resources" "$work/legacy/roles/no_scenario/tasks"
+echo '---' > "$work/legacy/roles/no_scenario/molecule/resources/prepare.yml"
+echo '---' > "$work/legacy/roles/no_scenario/tasks/main.yml"
+cp -R "$native/." "$work/native/" && rm -rf "$work/native/.venv"
+mkdir -p "$work/native/extensions/molecule/shared_tests"
+cp "$native/extensions/molecule/role1/"*.yml "$work/native/extensions/molecule/shared_tests/"
+cp -R "$native/." "$work/native-empty/" && rm -rf "$work/native-empty/.venv"
+find "$work/native-empty/extensions/molecule" -name molecule.yml -delete
+legacy_copy=(COLLECTION_PATH="$work/legacy" "$(uv_env "$legacy")" UV_OFFLINE=1)
+native_copy=(COLLECTION_PATH="$work/native" "$(uv_env "$native")" UV_OFFLINE=1)
+
+run_case "glob failed without molecule.yml is skipped" "$work/discover.sh" 0 \
+  "single_scenario/default" "${legacy_copy[@]}" "CHANGED_ROLES=no_scenario single_scenario"
+grep -q '^::warning::roles/no_scenario/molecule contains no scenario' "$work/log" \
+  || { echo "FAIL glob failed skip: no warning"; failures=$((failures + 1)); }
+grep -q 'without a scenario (not tested): no_scenario' "$work/summary" \
+  || { echo "FAIL glob failed skip: role missing from the step summary"; failures=$((failures + 1)); }
+run_case "glob failed with molecule.yml present fails" "$work/discover-fake.sh" fail "" \
   CHANGED_ROLES=single_scenario FAKE_OUTPUT="$work/glob-failed.txt" FAKE_RC=1
+run_case "other molecule list failure fails" "$work/discover-fake.sh" fail "" \
+  CHANGED_ROLES=single_scenario FAKE_OUTPUT="$work/garbage.txt" FAKE_RC=1
+run_case "native: glob failed without molecule.yml is skipped" "$work/discover.sh" 0 "" \
+  ALL_ROLES=true "LISTED_ROLES=role1 role2" COLLECTION_PATH="$work/native-empty" "$(uv_env "$native")" UV_OFFLINE=1
+run_case "native: glob failed with molecule.yml present fails" "$work/discover-fake.sh" fail "" \
+  "${native_all[@]}" FAKE_OUTPUT="$work/glob-failed.txt" FAKE_RC=1
+run_case "native: scenario without role runs with all roles" "$work/discover.sh" 0 \
+  "role1 role2/scenario1 role2/scenario2 shared_tests" "${native_copy[@]}" ALL_ROLES=true "LISTED_ROLES=role1 role2"
+run_case "native: scenario without role runs when the changeset selects all roles" "$work/discover.sh" 0 \
+  "role1 role2/scenario1 role2/scenario2 shared_tests" "${native_copy[@]}" CHANGED_ALL_ROLES=true "CHANGED_ROLES=role1 role2"
+run_case "native: scenario without role is not run for a changed role" "$work/discover.sh" 0 \
+  "role2/scenario1 role2/scenario2" "${native_copy[@]}" CHANGED_ROLES=role2
 
 # P4: molecule_scenarios.
 run_case "scenarios: listed role runs only listed, [] excludes" "$work/discover.sh" 0 \
@@ -155,6 +193,24 @@ run_case "lock: list of names accepted" "$work/discover.sh" 0 "single_scenario/d
 run_case "lock: not a list fails" "$work/discover.sh" fail "" \
   'MOLECULE_LOCK_SCENARIOS={"single_scenario": "default"}'
 run_case "lock: invalid JSON fails" "$work/discover.sh" fail "" 'MOLECULE_LOCK_SCENARIOS=["x"'
+
+# Issue #28: a changeset of 3000 files (GitHub API limit) selects all roles.
+# changed_roles_case <name> <number of files> <want all_roles> <want role_folders>
+changed_roles_case() {
+  local name=$1 n=$2 want_all=$3 want_roles=$4 out="$work/output" rc=0 got_all got_roles
+  : > "$out"
+  env GITHUB_OUTPUT="$out" COLLECTION_PATH="$legacy" MOLECULE_ENV_FILE= ALL_ROLES_PATHS=$'plugins/*\nuv.lock' \
+    CHANGED_FILES="$(jq -cn --argjson n "$n" --arg p "$legacy" '["\($p)/roles/single_scenario/tasks/main.yml"] + [range(1; $n) | "docs/\(.).md"]')" \
+    bash --noprofile --norc -eo pipefail "$work/changed-roles.sh" > "$work/log" 2>&1 || rc=$?
+  got_all=$(sed -n 's/^all_roles=//p' "$out")
+  got_roles=$(sed -n 's/^role_folders=//p' "$out" | xargs -n1 | sort | xargs)
+  if [[ $rc -ne 0 || "$got_all" != "$want_all" || "$got_roles" != "$want_roles" ]]; then
+    echo "FAIL $name: rc=$rc all_roles=[$got_all] role_folders=[$got_roles]"; cat "$work/log"; failures=$((failures + 1)); return
+  fi
+  echo "ok   $name"
+}
+changed_roles_case "changeset below the API limit maps files to roles" 2999 false "single_scenario"
+changed_roles_case "changeset at the API limit selects all roles" 3000 true "multi_scenario single_scenario"
 
 # Issue #27: credentials as actions/checkout v6+ stores them are removed.
 # cred_case <name> <want: removed|fail> [extra setup command] [extra check command]
