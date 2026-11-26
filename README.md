@@ -35,6 +35,8 @@ Inputs:
 - `molecule_env_file` (string, default: `''`): optional environment file sourced before Molecule runs
 - `publish_to_automationhub` (boolean, default: `false`): when `true`, build and publish collection artifact on tag runs
 - `automationhub_url` (string, default: `https://tower.vbc.ac.at/api/galaxy/`): private Automation Hub API endpoint passed to `ansible-galaxy collection publish --server`
+- `publish_runner` (string, default: `self-hosted`): runner label for the publish job; Automation Hub is only reachable from internal runners, so use a label that only dedicated release runners carry
+- `publish_environment` (string, default: `automationhub`): GitHub environment of the publish job in the calling repository
 - `sanity_ansible_versions` (string, default: `'["stable-2.16", "stable-2.17", "stable-2.18"]'`): JSON list of ansible-core branches for the sanity matrix; match it to `requires_ansible` in `meta/runtime.yml`
 - `molecule_all_roles_paths` (string, default: `plugins/*`, `requirements.yml`, `tests/requirements.yml`, `pyproject.toml`, `uv.lock`): newline-separated shell patterns, relative to `collection-path`, whose changes run the scenarios of all roles (`*` also matches `/`)
 - `molecule_timeout_minutes` (number, default: `120`): timeout for each Molecule scenario job
@@ -42,6 +44,12 @@ Inputs:
 Secrets:
 
 - `automationhub_token` (optional): required only when `publish_to_automationhub=true` on a tag run
+
+Publishing:
+
+- On tag runs with `publish_to_automationhub: true`, after `check` passes, `build-collection` builds the tarball on the `platform` runner without any secrets. It refuses tags that do not point to a commit on the default branch or whose version differs from the built tarball.
+- `publish-automationhub` runs on `publish_runner` in the `publish_environment` environment. It does not check out or install the repository: it downloads the tarball and uploads it with `ansible-galaxy` from a fixed `ansible-core` release. The token is passed through `ansible-galaxy`'s server configuration in the environment, never on the command line.
+- Protect the environment in the calling repository: required reviewers, and a deployment tag rule (e.g. `v*`). The `automationhub_token` secret can be stored as an environment secret there.
 
 Tag validation:
 
