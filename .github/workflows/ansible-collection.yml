@@ -1,5 +1,5 @@
 ---
-name: ansible-collection-tests
+name: ansible-collection-tests  # zizmor: ignore[excessive-permissions] jobs declare their own
 on:
   workflow_call:
     inputs:
@@ -60,9 +60,6 @@ on:
       automationhub_token:
         description: 'Token for publishing to private Automation Hub'
         required: false
-
-# Each job declares the token permissions it needs.
-permissions: {}
 
 jobs:
 
@@ -276,15 +273,16 @@ jobs:
         run: docker image ls --digests --filter 'reference=quay.io/ansible/*'
 
 
-  discover:
+  # Every other job declares the permissions it needs. discover keeps the
+  # caller's token as granted: dorny/paths-filter needs pull-requests: read on
+  # pull_request events in private repositories, and requesting a scope the
+  # caller did not grant would stop the whole workflow from starting.
+  discover:  # zizmor: ignore[excessive-permissions]
     runs-on: ubuntu-latest
     # Only needs validate-release, so Molecule (the slowest job) runs in parallel
     # with pre-commit, ansible-lint and sanity. check still waits for all of them.
     needs: validate-release
     timeout-minutes: 15
-    permissions:
-      contents: read
-      pull-requests: read  # dorny/paths-filter lists pull request files through the REST API
     outputs:
       role_scenarios: ${{ steps.discover-scenarios.outputs.role_scenarios }}
     steps:
@@ -409,14 +407,18 @@ jobs:
             read -r -a folders <<< "$CHANGED_ROLES"
           fi
 
-          mapfile -t unique_folders < <(printf "%s\n" "${folders[@]}" | sed '/^$/d' | sort -u)
-          echo "Found ${#unique_folders[@]} changed/selected role(s)"
-          for role in "${unique_folders[@]}"; do
-            if [[ ! "$role" =~ $role_re ]]; then
-              echo "Invalid role directory name: '$role' (allowed: $role_re)" >&2
-              exit 1
+          mapfile -t candidate_folders < <(printf "%s\n" "${folders[@]}" | sed '/^$/d' | sort -u)
+          # Collection role names are [a-z0-9_]; anything else under roles/ is
+          # not a role and is skipped, so its name never reaches a shell or the matrix.
+          unique_folders=()
+          for role in "${candidate_folders[@]}"; do
+            if [[ "$role" =~ $role_re ]]; then
+              unique_folders+=("$role")
+            else
+              printf '::warning::Skipping roles/ entry with an invalid role name: %q\n' "$role"
             fi
           done
+          echo "Found ${#unique_folders[@]} changed/selected role(s)"
 
           role_scenarios_json='[]'
           json_items=""
@@ -459,7 +461,7 @@ jobs:
                 continue
               fi
               if [[ ! "$scenario_name" =~ $scenario_re ]]; then
-                echo "Invalid scenario name: '$scenario_name' in role '$role' (allowed: $scenario_re)" >&2
+                printf 'Invalid scenario name: %q in role %s (allowed: %s)\n' "$scenario_name" "$role" "$scenario_re" >&2
                 exit 1
               fi
 
@@ -512,14 +514,13 @@ jobs:
                 if [[ -z "$role" || -z "$scenario" ]]; then
                   continue
                 fi
-                if [[ ! "$scenario" =~ $scenario_re ]]; then
-                  echo "Invalid scenario name: '$scenario' (allowed: $scenario_re)" >&2
-                  exit 1
-                fi
-
                 # Keep only role scenarios that are part of the selected/changed roles.
                 if ! printf "%s\n" "${unique_folders[@]}" | grep -Fxq "$role"; then
                   continue
+                fi
+                if [[ ! "$scenario" =~ $scenario_re ]]; then
+                  printf 'Invalid scenario name: %q (allowed: %s)\n' "$scenario" "$scenario_re" >&2
+                  exit 1
                 fi
 
                 json_items+="$(jq -c -n \

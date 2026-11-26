@@ -23,8 +23,9 @@ Molecule runs the scenarios of the roles touched by the changeset:
 
 Requirements for calling repositories:
 
-- The token needs `contents: read` and `pull-requests: read` (the `discover` job lists pull request files through the API). Repositories with the default read token have both; a caller that sets `permissions:` must include them.
+- Grant `contents: read`, plus `pull-requests: read` for change detection on pull requests in private and internal repositories. All jobs except `discover` reduce the token to what they need; `discover` uses the token as the caller grants it.
 - The collection must have a committed `uv.lock` that matches `pyproject.toml`: dependencies are installed with `uv sync --locked`, which fails instead of re-resolving.
+- uv is pinned to `0.13.6` (the newest release whose checksum is built into the pinned `setup-uv`), which takes precedence over a `[tool.uv] required-version` in the caller's `pyproject.toml`.
 
 Inputs:
 
