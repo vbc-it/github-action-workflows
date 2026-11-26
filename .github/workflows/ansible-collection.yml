@@ -189,27 +189,91 @@ jobs:
     permissions:
       contents: read
 
+    # Replaces ansible-community/ansible-test-gh-action, whose nested actions
+    # are not SHA-pinned. ansible-test runs the tests in its default test
+    # container, which has the pinned test dependencies and all Python
+    # versions the ansible-core release supports.
     steps:
-      # Run sanity tests inside a Docker container.
-      # The docker container has all the pinned dependencies that are
-      # required and all Python versions Ansible supports.
-      - name: Perform sanity testing
-        # See the documentation for the following GitHub action on
-        # https://github.com/ansible-community/ansible-test-gh-action/blob/main/README.md
-        uses: ansible-community/ansible-test-gh-action@6ded727edb598e670ac056a8e680ca4050bac0a3 # v1.18.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          ansible-core-version: ${{ matrix.ansible }}
-          testing-type: sanity
-          collection-root: ${{ inputs.collection-path }}
-          # OPTIONAL If your sanity tests require code
-          # from other collections, install them like this
-          # test-deps: >-
-          #   ansible.netcommon
-          #   ansible.utils
-          # OPTIONAL If set to true, will test only against changed files,
-          # which should improve CI performance. See limitations on
-          # https://github.com/ansible-community/ansible-test-gh-action#pull-request-change-detection
-          pull-request-change-detection: false
+          path: src
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          # A fixed uv release is checked against the checksum built into setup-uv.
+          version: '0.13.6'
+          enable-cache: false
+
+      - name: Install ansible-core
+        env:
+          ANSIBLE_BRANCH: ${{ matrix.ansible }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$ANSIBLE_BRANCH" =~ ^stable-2\.[0-9]+$ ]]; then
+            echo "::error::sanity_ansible_versions entries must look like stable-2.X"
+            printf 'Got: %q\n' "$ANSIBLE_BRANCH"
+            exit 1
+          fi
+          venv="$RUNNER_TEMP/ansible-sanity-venv"
+          # Python 3.12 runs ansible-test of ansible-core 2.16 to 2.20; the
+          # tests themselves run on the Python versions of the test container.
+          uv venv --no-config --python 3.12 "$venv"
+          # Newest PyPI release of the branch, wheels only, so no build
+          # scripts run.
+          uv pip install --no-config --python "$venv/bin/python" --only-binary ':all:' \
+            "ansible-core==${ANSIBLE_BRANCH#stable-}.*"
+          uv pip list --no-config --python "$venv/bin/python"
+
+      - name: Place collection at ansible_collections/<namespace>/<name>
+        id: place
+        env:
+          COLLECTION_PATH: ${{ inputs.collection-path }}
+        run: |
+          set -euo pipefail
+          if [[ "$COLLECTION_PATH" == /* || "/$COLLECTION_PATH/" == */../* ]]; then
+            echo "::error::collection-path must be a relative path inside the repository"
+            exit 1
+          fi
+          src=src
+          if [[ -n "$COLLECTION_PATH" && "$COLLECTION_PATH" != "." ]]; then
+            src="src/${COLLECTION_PATH%/}"
+          fi
+          meta=$("$RUNNER_TEMP/ansible-sanity-venv/bin/python" -I -c '
+          import sys, yaml
+          with open(sys.argv[1], encoding="utf-8") as f:
+              meta = yaml.safe_load(f)
+          print(meta["namespace"])
+          print(meta["name"])
+          ' "$src/galaxy.yml")
+          namespace=${meta%%$'\n'*}
+          name=${meta#*$'\n'}
+          for value in "$namespace" "$name"; do
+            if [[ ! "$value" =~ ^[a-z0-9_]+$ ]]; then
+              echo "::error::galaxy.yml namespace and name must match ^[a-z0-9_]+$"
+              printf 'Got: %q\n' "$value"
+              exit 1
+            fi
+          done
+          dest="ansible_collections/$namespace/$name"
+          mkdir -p "ansible_collections/$namespace"
+          mv "$src" "$dest"
+          echo "collection-dir=$dest" >> "$GITHUB_OUTPUT"
+
+      - name: Run ansible-test sanity
+        env:
+          COLLECTION_DIR: ${{ steps.place.outputs.collection-dir }}
+        run: |
+          set -euo pipefail
+          cd "$COLLECTION_DIR"
+          # The arguments ansible-test-gh-action used for sanity, without
+          # change detection and without coverage (sanity produces none).
+          "$RUNNER_TEMP/ansible-sanity-venv/bin/ansible-test" sanity -v --color --junit --docker default
+
+      - name: Show test container image
+        if: always()
+        run: docker image ls --digests --filter 'reference=quay.io/ansible/*'
 
 
   discover:
