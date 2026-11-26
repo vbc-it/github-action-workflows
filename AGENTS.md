@@ -31,6 +31,8 @@ Run from repository root unless noted otherwise.
   - `cd tests/ansible_collections/native_collection && uv run molecule list -f yaml`
 - Discover step unit tests (needs bash 4+, jq and both fixtures synced):
   - `tests/discover/test_discover.sh`
+- Lock step tests against a mock GitHub API (needs bash 4+, curl, jq, PyYAML):
+  - `PYTHON=tests/ansible_collections/legacy_collection/.venv/bin/python tests/lock/test_lock.sh`
 
 ## Repository Conventions
 
