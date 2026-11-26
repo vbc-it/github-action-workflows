@@ -15,6 +15,9 @@ jobs:
       platform: ubuntu-latest
       collection-path: tests/ansible_collections/legacy_collection
       force_all_roles: true
+      # multi_scenario runs only "second"; single_scenario is unlisted and
+      # still runs all its scenarios.
+      molecule_scenarios: '{"multi_scenario": ["second"]}'
 
   # Pull request path: changeset detection instead of force_all_roles, with
   # the minimum permissions documented for internal and private callers.
