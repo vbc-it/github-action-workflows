@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read  # discover job of the reusable workflow lists pull request files
 
 jobs:
   ansible-collection-legacy:
