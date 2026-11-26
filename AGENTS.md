@@ -42,7 +42,7 @@ Run from repository root unless noted otherwise.
 
 ## Important CI Behavior To Preserve
 
-- Job order: `pre-commit`, `ansible-lint`, `sanity` and `discover` all start after `validate-release` and run in parallel; `molecule` runs after `discover`; `check` needs all of them; on tag runs with publishing enabled, `build-collection` (GitHub-hosted, no secrets) runs after `check`, and `publish-automationhub` (artifact only, in the caller's environment) runs after `build-collection`.
+- Job order: `pre-commit`, `ansible-lint`, `sanity`, `discover` and `build` (when `build_collection`) all start after `validate-release` and run in parallel; `molecule` runs after `discover`; `check` needs all of them; on tag runs with publishing enabled, `build-collection` (GitHub-hosted, no secrets) runs after `check`, and `publish-automationhub` (artifact only, in the caller's environment) runs after `build-collection`.
 - Sanity matrix comes from the `sanity_ansible_versions` input (default `stable-2.16`, `stable-2.17`, `stable-2.18`).
 - All actions, including first-party `actions/*`, are pinned to release commit SHAs with a `# vX.Y.Z` comment. The repository setting "require SHA pinning" enforces this, so a tag reference fails the run.
 - Discovery must continue to:

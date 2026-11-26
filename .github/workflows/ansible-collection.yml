@@ -88,6 +88,16 @@ on:
         required: false
         default: ''
         type: string
+      build_collection:
+        description: 'Build the collection tarball with ansible-galaxy on every run and upload it as an artifact'
+        required: false
+        default: true
+        type: boolean
+      test_reports:
+        description: 'Write JUnit reports of the Molecule testinfra verifier and of sanity, upload them as artifacts and summarise them'
+        required: false
+        default: true
+        type: boolean
       test_all_roles_on_tag:
         description: >-
           Test all roles on tag runs, like force_all_roles. With false, tag runs
@@ -309,6 +319,7 @@ jobs:
           mkdir -p "ansible_collections/$namespace"
           mv "$src" "$dest"
           echo "collection-dir=$dest" >> "$GITHUB_OUTPUT"
+          echo "collection-id=$namespace-$name" >> "$GITHUB_OUTPUT"
 
       - name: Run ansible-test sanity
         env:
@@ -319,6 +330,15 @@ jobs:
           # The arguments ansible-test-gh-action used for sanity, without
           # change detection and without coverage (sanity produces none).
           "$RUNNER_TEMP/ansible-sanity-venv/bin/ansible-test" sanity -v --color --junit --docker default
+
+      - name: Upload sanity test report
+        if: ${{ always() && inputs.test_reports && steps.place.outputs.collection-dir != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-sanity-${{ steps.place.outputs.collection-id }}-${{ matrix.ansible }}-${{ github.run_attempt }}
+          path: ${{ steps.place.outputs.collection-dir }}/tests/output/junit/
+          if-no-files-found: ignore
+          overwrite: true
 
       - name: Show test container image
         if: always()
@@ -741,6 +761,24 @@ jobs:
         with:
           version: "2.35.0"
 
+      - name: Prepare test report
+        id: report
+        if: ${{ inputs.test_reports }}
+        env:
+          COLLECTION_PATH: ${{ inputs.collection-path }}
+          PLATFORM: ${{ inputs.platform }}
+          ROLE: ${{ matrix.role }}
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          # Role and scenario names were checked by discover; the key keeps
+          # artifact names apart when a run calls this workflow more than once.
+          key=$(printf '%s' "${COLLECTION_PATH}-${PLATFORM}" | sha1sum | cut -c1-8)
+          id="${ROLE}-${SCENARIO//\//-}"
+          dir="$RUNNER_TEMP/junit"
+          rm -rf "$dir" && mkdir -p "$dir"
+          echo "file=$dir/junit-molecule-${id}.xml" >> "$GITHUB_OUTPUT"
+          echo "artifact=junit-molecule-${id}-${key}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
       - name: Run molecule tests for role ${{ matrix.role }} scenario ${{ matrix.scenario }}
         run: |
           # shellcheck disable=SC1090
@@ -788,6 +826,11 @@ jobs:
             # shellcheck disable=SC1090
             set -a && source "$MOLECULE_ENV_FILE" && set +a
           fi
+          # testinfra (pytest) writes a JUnit report; appended to any PYTEST_ADDOPTS
+          # from molecule_env_file. Other verifiers ignore it.
+          if [[ -n "$JUNIT_FILE" ]]; then
+            export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+$PYTEST_ADDOPTS }--junit-xml=$JUNIT_FILE"
+          fi
           echo "INSTANCE_ID=${INSTANCE_ID}"
           molecule --version
           # required because with shared_state dependency is not executed before create scenario, but create needs dependencies to be installed
@@ -802,11 +845,120 @@ jobs:
           ANSIBLE_CONFIG_FILE: ${{ inputs.ansible_config }}
           OP_TOKEN_SECRET: ${{ secrets.op_service_account_token }}
           GALAXY_TOKEN_SECRET: ${{ secrets.galaxy_server_token }}
+          JUNIT_FILE: ${{ steps.report.outputs.file }}
           ROLE: ${{ matrix.role }}
           SCENARIO: ${{ matrix.scenario }}
           PY_COLORS: '1'
           ANSIBLE_FORCE_COLOR: '1'
           ANSIBLE_ROLES_PATH: "${GITHUB_WORKSPACE}/${{ inputs.collection-path }}/roles:~/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles"
+
+      - name: Upload test report
+        if: ${{ always() && steps.report.outputs.artifact != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.report.outputs.artifact }}
+          path: ${{ steps.report.outputs.file }}
+          if-no-files-found: ignore
+          overwrite: true
+
+      - name: Summarise test report
+        if: ${{ always() && steps.report.outputs.artifact != '' }}
+        env:
+          COLLECTION_PATH: ${{ inputs.collection-path }}
+          JUNIT_FILE: ${{ steps.report.outputs.file }}
+          TITLE: ${{ matrix.is_native && matrix.scenario || format('{0}/{1}', matrix.role, matrix.scenario) }}
+        run: |
+          {
+            echo "#### Molecule ${TITLE}"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ ! -s "$JUNIT_FILE" ]]; then
+            echo "No JUnit report: Molecule stopped before verify, or the verifier is not testinfra." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python="$GITHUB_WORKSPACE/$COLLECTION_PATH/.venv/bin/python"
+          [[ -x "$python" ]] || python=python3
+          "$python" -I - "$JUNIT_FILE" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+          keys = ("tests", "failures", "errors", "skipped")
+          totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in keys}
+          print("| " + " | ".join(keys) + " |")
+          print("|" + "---|" * len(keys))
+          print("| " + " | ".join(str(totals[k]) for k in keys) + " |")
+          failed = [
+              c for s in suites for c in s.iter("testcase")
+              if c.find("failure") is not None or c.find("error") is not None
+          ]
+          if failed:
+              print()
+              print("Failed:")
+              for c in failed:
+                  name = f"{c.get('classname', '')}::{c.get('name', '')}".replace("`", "'")
+                  print(f"- `{name}`")
+          PY
+
+  # Builds the collection tarball on every run, so a broken galaxy.yml or
+  # build_ignore fails CI before a release. Uses the same fixed ansible-galaxy
+  # as build-collection; no code from the repository runs.
+  build:
+    name: Build collection
+    needs: validate-release
+    if: ${{ inputs.build_collection }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: "0.13.9"
+          enable-cache: false
+
+      - name: Build collection tarball
+        id: build
+        working-directory: ${{ inputs.collection-path }}
+        env:
+          ANSIBLE_CORE_VERSION: "2.20.11"
+          UV_EXCLUDE_NEWER: "2026-11-19T00:00:00Z"
+        run: |
+          out="$RUNNER_TEMP/collection-build"
+          rm -rf "$out"
+          uv tool run --no-cache --no-config --python 3.12 --no-build \
+            --from "ansible-core==${ANSIBLE_CORE_VERSION}" \
+            ansible-galaxy collection build --output-path "$out"
+          shopt -s nullglob
+          artifacts=("$out"/*.tar.gz)
+          if [[ ${#artifacts[@]} -ne 1 ]]; then
+            echo "Expected exactly one collection tarball, found ${#artifacts[@]}." >&2
+            exit 1
+          fi
+          tarball=$(basename "${artifacts[0]}")
+          checksum=$(sha256sum "${artifacts[0]}" | cut -d' ' -f1)
+          echo "$checksum  $tarball"
+          echo "path=${artifacts[0]}" >> "$GITHUB_OUTPUT"
+          echo "artifact=collection-${tarball%.tar.gz}" >> "$GITHUB_OUTPUT"
+          {
+            echo "#### Collection"
+            echo
+            echo "\`$tarball\` (sha256 \`$checksum\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload collection tarball
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.build.outputs.artifact }}
+          path: ${{ steps.build.outputs.path }}
+          if-no-files-found: error
+          overwrite: true
 
   check:  # This job does nothing and is only used for the branch protection
           # or multi-stage CI jobs, like making sure that all tests pass before
@@ -820,6 +972,7 @@ jobs:
       - sanity
       - discover
       - molecule
+      - build
 
     runs-on: "ubuntu-latest"
     timeout-minutes: 5
@@ -830,7 +983,7 @@ jobs:
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
           jobs: ${{ toJSON(needs) }}
-          allowed-skips: molecule
+          allowed-skips: molecule, build
 
   # Builds the release tarball without any secrets, on a fresh GitHub-hosted
   # runner (no internal access needed, nothing left behind by earlier jobs), with
