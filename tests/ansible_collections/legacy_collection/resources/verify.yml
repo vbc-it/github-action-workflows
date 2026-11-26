@@ -28,3 +28,11 @@
           - instance_id is match('^[0-9a-f]{16}$')
           - instance_id == expected_id
         fail_msg: "INSTANCE_ID={{ instance_id }}, expected {{ expected_id }}"
+
+    # test-self passes molecule_base_config and ansible_config for this fixture.
+    - name: Assert molecule_base_config and ansible_config were applied
+      when: lookup('ansible.builtin.env', 'GITHUB_RUN_ID') | length > 0
+      ansible.builtin.assert:
+        that:
+          - lookup('ansible.builtin.env', 'FIXTURE_BASE_CONFIG') == 'loaded'
+          - lookup('ansible.builtin.env', 'FIXTURE_ANSIBLE_CONFIG') is search('/legacy_collection/resources/ansible\.cfg$')

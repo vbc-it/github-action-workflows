@@ -18,6 +18,9 @@ jobs:
       # multi_scenario runs only "second"; single_scenario is unlisted and
       # still runs all its scenarios.
       molecule_scenarios: '{"multi_scenario": ["second"]}'
+      # Checked by resources/verify.yml of the fixture.
+      molecule_base_config: tests/ansible_collections/legacy_collection/resources/molecule-base.yml
+      ansible_config: tests/ansible_collections/legacy_collection/resources/ansible.cfg
 
   # Pull request path: changeset detection instead of force_all_roles, with
   # the minimum permissions documented for internal and private callers.
@@ -30,6 +33,8 @@ jobs:
     with:
       platform: ubuntu-latest
       collection-path: tests/ansible_collections/legacy_collection
+      molecule_base_config: tests/ansible_collections/legacy_collection/resources/molecule-base.yml
+      ansible_config: tests/ansible_collections/legacy_collection/resources/ansible.cfg
 
   # Unit tests of the discover step script, including the cases that must
   # fail discover (which a call of the reusable workflow cannot assert).

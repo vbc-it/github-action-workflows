@@ -1,0 +1,7 @@
+---
+# Passed by test-self as molecule_base_config. Molecule expands ${ANSIBLE_CONFIG}
+# when it loads the config, so verify.yml can check both inputs.
+provisioner:
+  env:
+    FIXTURE_BASE_CONFIG: loaded
+    FIXTURE_ANSIBLE_CONFIG: ${ANSIBLE_CONFIG}

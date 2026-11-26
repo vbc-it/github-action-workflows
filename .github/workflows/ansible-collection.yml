@@ -70,6 +70,16 @@ on:
         required: false
         default: 0
         type: number
+      molecule_base_config:
+        description: 'Repository-relative path of a Molecule base config, passed as molecule --base-config'
+        required: false
+        default: ''
+        type: string
+      ansible_config:
+        description: 'Repository-relative path of an ansible.cfg, exported as ANSIBLE_CONFIG for Molecule'
+        required: false
+        default: ''
+        type: string
       test_all_roles_on_tag:
         description: >-
           Test all roles on tag runs, like force_all_roles. With false, tag runs
@@ -726,6 +736,27 @@ jobs:
           fi
           unset OP_TOKEN_SECRET GALAXY_TOKEN_SECRET
 
+          # Repository-relative config files.
+          repo_file() {
+            if [[ "$2" == /* || "/$2/" == */../* ]]; then
+              printf '::error::%s must be a path relative to the repository root, got %q\n' "$1" "$2"
+              exit 1
+            fi
+            if [[ ! -f "$GITHUB_WORKSPACE/$2" ]]; then
+              printf '::error::%s: %q does not exist\n' "$1" "$2"
+              exit 1
+            fi
+          }
+          base_config=()
+          if [[ -n "$MOLECULE_BASE_CONFIG" ]]; then
+            repo_file molecule_base_config "$MOLECULE_BASE_CONFIG"
+            base_config=(--base-config "$GITHUB_WORKSPACE/$MOLECULE_BASE_CONFIG")
+          fi
+          if [[ -n "$ANSIBLE_CONFIG_FILE" ]]; then
+            repo_file ansible_config "$ANSIBLE_CONFIG_FILE"
+            export ANSIBLE_CONFIG="$GITHUB_WORKSPACE/$ANSIBLE_CONFIG_FILE"
+          fi
+
           if [[ -n "$MOLECULE_ENV_FILE" ]]; then
             # shellcheck disable=SC1090
             set -a && source "$MOLECULE_ENV_FILE" && set +a
@@ -733,13 +764,15 @@ jobs:
           echo "INSTANCE_ID=${INSTANCE_ID}"
           molecule --version
           # required because with shared_state dependency is not executed before create scenario, but create needs dependencies to be installed
-          molecule dependency --scenario-name "$SCENARIO"
-          molecule test --scenario-name "$SCENARIO"
+          molecule "${base_config[@]}" dependency --scenario-name "$SCENARIO"
+          molecule "${base_config[@]}" test --scenario-name "$SCENARIO"
 
         working-directory: ${{ matrix.is_native && inputs.collection-path || format('{0}/roles/{1}', inputs.collection-path, matrix.role) }}
         env:
           COLLECTION_PATH: ${{ inputs.collection-path }}
           MOLECULE_ENV_FILE: ${{ inputs.molecule_env_file }}
+          MOLECULE_BASE_CONFIG: ${{ inputs.molecule_base_config }}
+          ANSIBLE_CONFIG_FILE: ${{ inputs.ansible_config }}
           OP_TOKEN_SECRET: ${{ secrets.op_service_account_token }}
           GALAXY_TOKEN_SECRET: ${{ secrets.galaxy_server_token }}
           ROLE: ${{ matrix.role }}
