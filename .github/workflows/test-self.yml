@@ -158,5 +158,9 @@ jobs:
       context: tests/container_image
       dockerfile: tests/container_image/Dockerfile
       build_args: |
-        BASE=scratch
         GREETING=hello
+      # Exports the image as an OCI archive and runs syft without pushing.
+      sbom: true
+    secrets:
+      # Checked by the fixture Dockerfile; not a real secret.
+      build_secrets: fixture_secret=fixture-value

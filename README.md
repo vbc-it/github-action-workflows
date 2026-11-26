@@ -113,8 +113,8 @@ Caching:
 
 Builds one container image from a Dockerfile with `docker build --pull`, pushes it with `skopeo` and can launch an AAP job template afterwards. Three jobs keep the code of the calling repository away from the credentials:
 
-- `build` runs on `platform` with `contents: read` and no secrets. It builds the image and, when `push: true`, exports it by the image ID that `docker build --iidfile` wrote (not by its local tag, which another job on the same daemon could retag) to an OCI archive and uploads it as a workflow artifact (`container-image-<run>-<attempt>-<hash>`, kept for one day). The manifest digest is fixed at this point and passed on as a job output.
-- `push` runs on `push_runner` in the `push_environment` environment, only when `push: true`. It checks out nothing and runs no code from the repository: it downloads the archive by artifact ID, checks that its manifest digest is the one `build` reported, logs in and copies it with `skopeo copy --preserve-digests`. The first tag is pushed from the archive and every further tag is copied from that manifest digest in the registry; the job fails if a tag ends up with another digest. The digest is written to the job summary and returned as the `digest` and `image_ref` outputs.
+- `build` runs on `platform` with `contents: read` and no secrets except `build_secrets`. It builds the image and, when `push: true`, exports it by the image ID that `docker build --iidfile` wrote (not by its local tag, which another job on the same daemon could retag) to an OCI archive and uploads it as a workflow artifact (`container-image-<run>-<attempt>-<hash>`, kept for one day). The manifest digest is fixed at this point and passed on as a job output.
+- `push` runs on `push_runner` in the `push_environment` environment, only when `push: true`. It checks out nothing and runs no code from the repository: it downloads the archive by artifact ID, checks that its manifest digest is the one `build` reported, logs in and copies it with `skopeo copy --preserve-digests`. The first tag is pushed from the archive and every further tag is copied from that manifest digest in the registry; the job fails if a tag ends up with another digest. The digest is written to the job summary and returned as the `digest` and `image_ref` outputs. With `sign` and `provenance` it then signs and attests that digest (see below).
 - `deploy` runs on `push_runner` in the `deploy_environment` environment, only after a push and only when `aap_job_template` is set. It launches the template with `aap_launch` as request body, with the pushed image by digest added to `extra_vars` (see `aap_image_var`), and fails unless the AAP job ends as `successful`. curl reads the AAP credentials as a config from a pipe, so they never appear in process arguments on the runner host.
 
 Other behaviour:
@@ -124,6 +124,45 @@ Other behaviour:
 - The pushed reference is `<registry>/<namespace>/<image>:<tag>` for every tag in `tags`. Without `tags`, the branch or tag name of the run is the tag. A branch whose name looks like a release or moving tag (`latest`, `stable`, or starting with a digit or `v` and a digit, e.g. `v2.0.0`) is refused: set `tags` explicitly to push such a branch. Every tag must be a valid image tag (`[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}`), so a branch like `feature/x` needs explicit `tags`.
 - A build that pushes uses `--no-cache`, so it cannot reuse layers that another job on a shared docker daemon put in the build cache. `push: false` builds keep the cache.
 - A repository with several images calls the workflow once per image, for example from a matrix.
+
+Build secrets and base images:
+
+- Build arguments (`build_args`) are stored in the image history and metadata; anyone who can pull the image can read them. Never pass credentials as build arguments.
+- Pass credentials the build needs (e.g. a package index token) in the `build_secrets` secret, one `ID=VALUE` per line (single-line values; the ID may contain letters, digits, `_`, `.` and `-`). Each value is written to a file readable only by the runner user under `$RUNNER_TEMP`, passed as `docker build --secret id=<ID>,src=<file>` (BuildKit) and removed after the build; it is masked in the log. In the Dockerfile, mount it only into the step that needs it, e.g. `RUN --mount=type=secret,id=pip_token,required=true PIP_INDEX_URL="https://__token__:$(cat /run/secrets/pip_token)@pypi.example/simple" pip install ...`. The secret is not stored in a layer or in the history, unless the step itself writes it into the image. The code of the calling repository's Dockerfile can read these secrets, so pass only what the build needs.
+- Pin base images by digest, e.g. `FROM python:3.13-slim@sha256:...`, so a moved tag cannot change the image you build. Dependabot updates both the tag and the digest with the `docker` ecosystem in `.github/dependabot.yml`:
+
+  ```yaml
+  version: 2
+  updates:
+      - package-ecosystem: docker
+        directory: /   # the directory of the Dockerfile
+        schedule:
+            interval: weekly
+  ```
+
+  Base images from a private registry need a `registries` entry with credentials in the same file.
+
+Signing, SBOM and provenance (all off by default):
+
+- `sbom: true`: `build` scans the exported image with [syft](https://github.com/anchore/syft) (`1.57.0`, downloaded from its GitHub release and checked against a pinned SHA-256) and uploads an SPDX JSON SBOM as the artifact `sbom-<run>-<attempt>-<hash>`. This also works with `push: false`.
+- `sign: true`: after the push, the `push` job signs the digest with [cosign](https://github.com/sigstore/cosign) (`v3.1.4`, installed with the pinned `sigstore/cosign-installer`, which checks the binary's checksum) keyless: cosign gets a short-lived certificate for the workflow identity from the public Sigstore Fulcio with the job's GitHub OIDC token and records the signature in the public Rekor transparency log. The signature is stored in the registry next to the image (as an OCI referrer, or a `sha256-<digest>` tag where the registry has no referrers API). With `sbom: true` as well, the SBOM is attached as a signed `spdxjson` attestation.
+- `provenance: true`: the `push` job creates a GitHub artifact attestation with SLSA build provenance for `<registry>/<namespace>/<image>@<digest>` with `actions/attest-build-provenance`. It is stored by GitHub, not pushed to the registry. Artifact attestations in private and internal repositories need GitHub Enterprise Cloud.
+- Keyless signing and public-repository attestations publish an entry to the public Rekor log that contains the image digest, the calling repository, the workflow, the ref and the commit. Do not enable them for repositories whose names or refs must not be public.
+- `push_runner` must reach `fulcio.sigstore.dev` and `rekor.sigstore.dev` for `sign`, and the GitHub API for `provenance`.
+- Verify a signature and the SBOM attestation (replace the caller repository and the ref of this workflow you use):
+
+  ```sh
+  cosign verify quay.vbc.ac.at/it/netbox@sha256:... \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      --certificate-identity 'https://github.com/vbc-it/github-action-workflows/.github/workflows/container-image.yml@refs/heads/main' \
+      --certificate-github-workflow-repository vbc-it/netbox-docker
+  cosign verify-attestation --type spdxjson ... # same flags
+  gh attestation verify oci://quay.vbc.ac.at/it/netbox@sha256:... \
+      --repo vbc-it/netbox-docker \
+      --signer-workflow vbc-it/github-action-workflows/.github/workflows/container-image.yml
+  ```
+
+  The certificate identity is the reusable workflow at the ref the caller uses; `--certificate-github-workflow-repository` and `--certificate-github-workflow-ref` check the calling repository and its branch or tag. `cosign` and `gh` read registry credentials from `docker login`.
 
 Environments (the push and deploy gate):
 
@@ -141,7 +180,18 @@ Requirements:
 
 - `platform` needs `docker` (with BuildKit) and `skopeo`; `push_runner` needs `skopeo`, `curl` and `jq`. skopeo must support `--digestfile`, `--preserve-digests` and the `docker-daemon:` transport by image ID (tested with 1.25.2). `quay.vbc.ac.at` and `tower.vbc.ac.at` need a self-hosted runner.
 - Point `push_runner` at runners you trust with the registry and AAP credentials, ideally dedicated and ephemeral ones that do not run builds: a runner that also builds images or runs tests can be tampered with by code from any branch.
-- Grant `contents: read`. Environments need no extra token permission.
+- With `sbom: true`, `platform` also needs `curl`, `tar`, `sha256sum` and `jq`, and must reach `github.com` to download syft.
+
+Minimum caller permissions:
+
+| Inputs | `permissions:` on the calling job |
+|---|---|
+| default | `contents: read` |
+| `sign: true` | `contents: read`, `id-token: write` |
+| `provenance: true` | `contents: read`, `id-token: write`, `attestations: write` |
+
+- Environments need no extra token permission.
+- The `push` job declares no permissions, so it gets the token as the caller grants it: a reusable workflow job that requests a permission the caller did not grant stops the whole run from starting, so `push` cannot request `id-token: write` only when `sign` is set. It runs no repository code and does not use the token except for signing and attestations; grant `id-token: write` and `attestations: write` only to callers that use `sign` or `provenance`. `build` and `deploy` reduce the token to `contents: read` and nothing. `push` fails before pushing when `sign` or `provenance` is set and `id-token: write` is missing.
 
 Inputs:
 
@@ -152,13 +202,16 @@ Inputs:
 - `ref` (string, default: ref of the run): branch, tag or commit of the calling repository to build, e.g. an existing git tag chosen in a `workflow_dispatch` run
 - `context` (string, default: `.`): build context, relative to the repository root
 - `dockerfile` (string, default: `Dockerfile`): relative to the repository root
-- `build_args` (string, default: `''`): newline-separated `KEY=VALUE` build arguments
+- `build_args` (string, default: `''`): newline-separated `KEY=VALUE` build arguments; visible in the image history, never use them for credentials
 - `tags` (string, default: branch or tag name): newline-separated tags to push
 - `push` (boolean, default: `false`)
 - `platform` (string, default: `self-hosted`): runner to build on
 - `push_runner` (string, default: `''`): runner for `push` and `deploy`; empty uses `platform`
 - `push_environment` (string, default: `registry`): GitHub environment of the `push` job in the calling repository
 - `deploy_environment` (string, default: `aap`): GitHub environment of the `deploy` job in the calling repository
+- `sbom` (boolean, default: `false`): generate an SPDX SBOM with syft and upload it as an artifact; with `sign`, attach it as a signed attestation
+- `sign` (boolean, default: `false`): sign the pushed digest with cosign keyless signing; needs `id-token: write`
+- `provenance` (boolean, default: `false`): create a GitHub artifact attestation with build provenance for the pushed digest; needs `id-token: write` and `attestations: write`
 - `aap_job_template` (string, default: `''`): numeric ID of the AAP job template to launch after a push
 - `aap_launch` (string, default: `{}`): JSON body of the launch request, e.g. `{"job_tags": "reload", "extra_vars": {"tag": "main"}}`
 - `aap_image_var` (string, default: `container_image_ref`): extra var that receives the pushed image by digest; empty adds none
@@ -167,6 +220,7 @@ Inputs:
 
 Secrets:
 
+- `build_secrets` (optional): newline-separated `ID=VALUE` BuildKit secrets for `docker build --secret`
 - `registry_password` (optional): required when `push: true`; prefer an environment secret `REGISTRY_PASSWORD` in `push_environment`
 - `aap_username`, `aap_password` (optional): required when `aap_job_template` is set; prefer environment secrets `AAP_USERNAME` and `AAP_PASSWORD` in `deploy_environment`
 
@@ -190,6 +244,7 @@ jobs:
     image:
         permissions:
             contents: read
+            id-token: write  # for sign
         uses: your-org/github-action-workflows/.github/workflows/container-image.yml@main
         # REGISTRY_PASSWORD, AAP_USERNAME and AAP_PASSWORD are environment
         # secrets of the protected environments "registry" and "aap"; they
@@ -198,6 +253,9 @@ jobs:
             registry_password: ${{ secrets.REGISTRY_PASSWORD }}
             aap_username: ${{ secrets.AAP_USERNAME }}
             aap_password: ${{ secrets.AAP_PASSWORD }}
+            # Read in the Dockerfile with RUN --mount=type=secret,id=pip_token
+            build_secrets: |
+                pip_token=${{ secrets.PIP_TOKEN }}
         with:
             image: netbox
             registry_username: it+github_pusher
@@ -207,12 +265,14 @@ jobs:
             push_runner: release
             push_environment: registry
             deploy_environment: aap
+            sbom: true
+            sign: true
             aap_job_template: ${{ github.ref_type == 'branch' && '123' || '' }}
             # The playbook deploys extra_vars.container_image_ref (image@sha256:...).
             aap_launch: '{"job_tags": "reload"}'
 ```
 
-The self-test builds `tests/container_image` without pushing.
+The self-test builds `tests/container_image` without pushing: it passes a build secret that the fixture Dockerfile checks, and generates an SBOM.
 
 ## How to use
 
