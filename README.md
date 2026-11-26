@@ -199,6 +199,9 @@ jobs:
             molecule_lock_scenarios: '["certificate/create"]'
             molecule_base_config: .config/molecule/ci.yml
             ansible_config: .config/ansible.cfg
+            # Defaults: build the tarball and upload JUnit reports on every run
+            build_collection: true
+            test_reports: true
 ```
 
 This workflow is tested in this repo with the `test_collection` sample using `.github/workflows/test-self.yml`.
