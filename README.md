@@ -18,7 +18,13 @@ Molecule runs the scenarios of the roles touched by the changeset:
 
 - Files under `roles/<role>/` or `extensions/molecule/<role>/` select that role.
 - Other files under `extensions/molecule/` (shared `config.yml`, inventory, `default` scenario), the `molecule_env_file`, and files matching `molecule_all_roles_paths` select all roles.
-- `schedule` and `workflow_dispatch` runs, and `force_all_roles: true`, test all roles.
+- `schedule`, `workflow_dispatch` and tag runs, and `force_all_roles: true`, test all roles. Tag runs always test everything so a release is never published on an empty changeset.
+- Role and scenario directory names must be plain names (`^[A-Za-z0-9_]+$` for roles); discovery fails on anything else.
+
+Requirements for calling repositories:
+
+- The token needs `contents: read` and `pull-requests: read` (the `discover` job lists pull request files through the API). Repositories with the default read token have both; a caller that sets `permissions:` must include them.
+- The collection must have a committed `uv.lock` that matches `pyproject.toml`: dependencies are installed with `uv sync --locked`, which fails instead of re-resolving.
 
 Inputs:
 
@@ -68,6 +74,9 @@ concurrency:
 
 jobs:
     tests:
+        permissions:
+            contents: read
+            pull-requests: read
         uses: your-org/github-action-workflows/.github/workflows/ansible-collection.yml@main
         secrets:
             automationhub_token: ${{ secrets.AUTOMATIONHUB_TOKEN }}

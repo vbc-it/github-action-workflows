@@ -61,35 +61,47 @@ on:
         description: 'Token for publishing to private Automation Hub'
         required: false
 
+# Each job declares the token permissions it needs.
+permissions: {}
 
 jobs:
 
   validate-release:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Validate tag and publish configuration
         if: ${{ inputs.publish_to_automationhub && github.ref_type == 'tag' }}
+        env:
+          AUTOMATIONHUB_URL: ${{ inputs.automationhub_url }}
+          # Only whether the secret is set reaches the script, never its value.
+          HAS_AUTOMATIONHUB_TOKEN: ${{ secrets.automationhub_token != '' }}
+          COLLECTION_PATH: ${{ inputs.collection-path }}
         run: |
-          if [[ -z "${{ inputs.automationhub_url }}" ]]; then
+          if [[ -z "$AUTOMATIONHUB_URL" ]]; then
             echo "publish_to_automationhub=true requires automationhub_url." >&2
             exit 1
           fi
 
-          if [[ -z "${{ secrets.automationhub_token }}" ]]; then
+          if [[ "$HAS_AUTOMATIONHUB_TOKEN" != "true" ]]; then
             echo "publish_to_automationhub=true requires secrets.automationhub_token." >&2
             exit 1
           fi
 
-          galaxy_file="${{ inputs.collection-path }}/galaxy.yml"
+          galaxy_file="$COLLECTION_PATH/galaxy.yml"
           if [[ ! -f "$galaxy_file" ]]; then
             echo "Could not find galaxy.yml at $galaxy_file" >&2
             exit 1
           fi
 
-          galaxy_version=$(sed -nE "s/^[[:space:]]*version:[[:space:]]*['\"]?([^'\"[:space:]]+)['\"]?[[:space:]]*$/\1/p" "$galaxy_file" | head -n1)
+          # Top-level key only: an indented "version:" elsewhere in the file must not match.
+          galaxy_version=$(sed -nE "s/^version:[[:space:]]*['\"]?([^'\"[:space:]]+)['\"]?[[:space:]]*$/\1/p" "$galaxy_file" | head -n1)
           if [[ -z "$galaxy_version" ]]; then
             echo "Unable to read version from $galaxy_file" >&2
             exit 1
@@ -107,8 +119,12 @@ jobs:
     needs: validate-release
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - uses: tox-dev/action-pre-commit-uv@9316eafda3550b0365575c60b9f53725a81d0cfd # v1.1.2
         env:
           SKIP: ansible-lint
@@ -118,13 +134,19 @@ jobs:
     needs: validate-release
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Check if requirements.yml exists
         id: check-requirements
+        env:
+          COLLECTION_PATH: ${{ inputs.collection-path }}
         run: |
-          if [[ -f "${{ inputs.collection-path }}/requirements.yml" ]]; then
+          if [[ -f "$COLLECTION_PATH/requirements.yml" ]]; then
             echo "has-requirements=true" >> $GITHUB_OUTPUT
           else
             echo "has-requirements=false" >> $GITHUB_OUTPUT
@@ -164,6 +186,8 @@ jobs:
 
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
 
     steps:
       # Run sanity tests inside a Docker container.
@@ -194,36 +218,50 @@ jobs:
     # with pre-commit, ansible-lint and sanity. check still waits for all of them.
     needs: validate-release
     timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read  # dorny/paths-filter lists pull request files through the REST API
     outputs:
       role_scenarios: ${{ steps.discover-scenarios.outputs.role_scenarios }}
     steps:
+      # Credentials stay in .git/config here: dorny/paths-filter runs git fetch
+      # on push events, which needs them for private and internal repositories.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: true  # zizmor: ignore[artipacked]
 
       - name: Set up uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          # Newest version whose checksum is built into this setup-uv release.
+          version: "0.13.6"
 
       - name: Sync dependencies with uv
-        run: uv sync --dev
+        run: uv sync --locked --dev
         working-directory: ${{ inputs.collection-path }}
 
-      # Add a step to detect the event type
+      # Tag runs test all roles: a release must not be published on an empty changeset.
       - name: Set test scope
         id: scope
+        env:
+          FORCE_ALL_ROLES: ${{ inputs.force_all_roles }}
         run: |
-          if [[ "${{ inputs.force_all_roles }}" == "true" ]]; then
-            echo "all_roles=true" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" || "${{ github.event_name }}" == "schedule" ]]; then
-            echo "all_roles=true" >> $GITHUB_OUTPUT
+          if [[ "$FORCE_ALL_ROLES" == "true" ]]; then
+            echo "all_roles=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "schedule" || "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "all_roles=true" >> "$GITHUB_OUTPUT"
           else
-            echo "all_roles=false" >> $GITHUB_OUTPUT
+            echo "all_roles=false" >> "$GITHUB_OUTPUT"
           fi
 
       # Add a step to list all roles when running full tests
       - name: List all roles
         id: list-roles
         if: steps.scope.outputs.all_roles == 'true'
+        env:
+          COLLECTION_PATH: ${{ inputs.collection-path }}
         run: |
-          echo "role_folders=$(find ${{ inputs.collection-path }}/roles/* -maxdepth 0 -type d -exec basename {} \; | tr '\n' ' ')" >> $GITHUB_OUTPUT
+          echo "role_folders=$(find "$COLLECTION_PATH"/roles/* -maxdepth 0 -type d -exec basename {} \; | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
 
       - name: Find changeset
         if: steps.scope.outputs.all_roles == 'false'
@@ -289,23 +327,39 @@ jobs:
 
       - name: Discover scenarios for each role
         id: discover-scenarios
+        env:
+          ALL_ROLES: ${{ steps.scope.outputs.all_roles }}
+          LISTED_ROLES: ${{ steps.list-roles.outputs.role_folders }}
+          CHANGED_ROLES: ${{ steps.changed-roles.outputs.role_folders }}
+          COLLECTION_PATH: ${{ inputs.collection-path }}
         run: |
+          # Role and scenario names come from directory names in the caller's
+          # changeset and end up in the job matrix, so only plain names pass.
+          role_re='^[A-Za-z0-9_]+$'
+          scenario_re='^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)?$'
+
           folders=()
-          if [[ "${{ steps.scope.outputs.all_roles }}" == "true" ]]; then
-            read -r -a folders <<< "${{ steps.list-roles.outputs.role_folders }}"
+          if [[ "$ALL_ROLES" == "true" ]]; then
+            read -r -a folders <<< "$LISTED_ROLES"
           else
-            read -r -a folders <<< "${{ steps.changed-roles.outputs.role_folders }}"
+            read -r -a folders <<< "$CHANGED_ROLES"
           fi
 
-          unique_folders=($(printf "%s\n" "${folders[@]}" | sed '/^$/d' | sort -u))
+          mapfile -t unique_folders < <(printf "%s\n" "${folders[@]}" | sed '/^$/d' | sort -u)
           echo "Found ${#unique_folders[@]} changed/selected role(s)"
+          for role in "${unique_folders[@]}"; do
+            if [[ ! "$role" =~ $role_re ]]; then
+              echo "Invalid role directory name: '$role' (allowed: $role_re)" >&2
+              exit 1
+            fi
+          done
 
           role_scenarios_json='[]'
           json_items=""
 
           # Legacy collection: discover scenarios by running Molecule inside each selected role.
           for role in "${unique_folders[@]}"; do
-            role_path="${{ inputs.collection-path }}/roles/$role"
+            role_path="$COLLECTION_PATH/roles/$role"
             if [[ ! -d "$role_path/molecule" ]]; then
               continue
             fi
@@ -340,6 +394,10 @@ jobs:
               if [[ -z "$scenario_name" ]]; then
                 continue
               fi
+              if [[ ! "$scenario_name" =~ $scenario_re ]]; then
+                echo "Invalid scenario name: '$scenario_name' in role '$role' (allowed: $scenario_re)" >&2
+                exit 1
+              fi
 
               json_items+="$(jq -c -n \
                 --arg role "$role" \
@@ -351,9 +409,9 @@ jobs:
           done
 
           # Native collection: discover scenarios from collection root.
-          if [[ -d "${{ inputs.collection-path }}/extensions/molecule" ]]; then
+          if [[ -d "$COLLECTION_PATH/extensions/molecule" ]]; then
             set +e
-            native_output=$(cd "${{ inputs.collection-path }}" && uv run molecule list -f yaml 2>&1)
+            native_output=$(cd "$COLLECTION_PATH" && uv run molecule list -f yaml 2>&1)
             native_rc=$?
             set -e
 
@@ -389,6 +447,10 @@ jobs:
                 scenario="$(printf '%s' "$scenario" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
                 if [[ -z "$role" || -z "$scenario" ]]; then
                   continue
+                fi
+                if [[ ! "$scenario" =~ $scenario_re ]]; then
+                  echo "Invalid scenario name: '$scenario' (allowed: $scenario_re)" >&2
+                  exit 1
                 fi
 
                 # Keep only role scenarios that are part of the selected/changed roles.
@@ -431,29 +493,38 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.discover.outputs.role_scenarios) }}
       fail-fast: false
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Set up uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.6"
 
       - name: Sync dependencies with uv
-        run: uv sync --dev
+        run: uv sync --locked --dev
         working-directory: ${{ inputs.collection-path }}
 
       - name: Run molecule tests for role ${{ matrix.role }} scenario ${{ matrix.scenario }}
         run: |
-          source ${GITHUB_WORKSPACE}/${{ inputs.collection-path }}/.venv/bin/activate
-          if [[ -n "${{ inputs.molecule_env_file }}" ]]; then
-            set -a && source "${{ inputs.molecule_env_file }}" && set +a
+          source "$GITHUB_WORKSPACE/$COLLECTION_PATH/.venv/bin/activate"
+          if [[ -n "$MOLECULE_ENV_FILE" ]]; then
+            set -a && source "$MOLECULE_ENV_FILE" && set +a
           fi
           molecule --version
           # required because with shared_state dependency is not executed before create scenario, but create needs dependencies to be installed
-          molecule dependency --scenario-name "${{ matrix.scenario }}"
-          molecule test --scenario-name "${{ matrix.scenario }}"
+          molecule dependency --scenario-name "$SCENARIO"
+          molecule test --scenario-name "$SCENARIO"
 
         working-directory: ${{ matrix.is_native && inputs.collection-path || format('{0}/roles/{1}', inputs.collection-path, matrix.role) }}
         env:
+          COLLECTION_PATH: ${{ inputs.collection-path }}
+          MOLECULE_ENV_FILE: ${{ inputs.molecule_env_file }}
+          SCENARIO: ${{ matrix.scenario }}
           PY_COLORS: '1'
           ANSIBLE_FORCE_COLOR: '1'
           ANSIBLE_ROLES_PATH: "${GITHUB_WORKSPACE}/${{ inputs.collection-path }}/roles:~/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles"
@@ -473,6 +544,7 @@ jobs:
 
     runs-on: "ubuntu-latest"
     timeout-minutes: 5
+    permissions: {}
 
     steps:
       - name: Decide whether the needed jobs succeeded or failed
@@ -486,26 +558,38 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 20
     if: ${{ always() && needs.check.result == 'success' && inputs.publish_to_automationhub && github.ref_type == 'tag' }}
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Set up uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.6"
 
       - name: Sync dependencies with uv
-        run: uv sync --dev
+        run: uv sync --locked --dev
         working-directory: ${{ inputs.collection-path }}
 
       - name: Build collection artifact
-        run: uv run ansible-galaxy collection build --output-path dist
+        run: uv run --locked ansible-galaxy collection build --output-path dist
         working-directory: ${{ inputs.collection-path }}
 
+      # The token reaches ansible-galaxy through its server configuration in the
+      # environment, so it is neither in the generated script nor on the command line.
       - name: Publish collection artifact to private Automation Hub
+        env:
+          ANSIBLE_GALAXY_SERVER_LIST: automationhub
+          ANSIBLE_GALAXY_SERVER_AUTOMATIONHUB_URL: ${{ inputs.automationhub_url }}
+          ANSIBLE_GALAXY_SERVER_AUTOMATIONHUB_TOKEN: ${{ secrets.automationhub_token }}
         run: |
           artifact=$(ls -1 dist/*.tar.gz | head -n1)
           if [[ -z "$artifact" ]]; then
             echo "No built collection artifact found in dist/." >&2
             exit 1
           fi
-          uv run ansible-galaxy collection publish "$artifact" --server "${{ inputs.automationhub_url }}" --token "${{ secrets.automationhub_token }}"
+          uv run --locked ansible-galaxy collection publish "$artifact" --server automationhub
         working-directory: ${{ inputs.collection-path }}
