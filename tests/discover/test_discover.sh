@@ -142,6 +142,13 @@ run_case "scenarios: native [] excludes" "$work/discover.sh" 0 \
 run_case "scenarios: native missing scenario fails" "$work/discover.sh" fail "" \
   "${native_all[@]}" 'MOLECULE_SCENARIOS={"role2": ["scenario3"]}'
 
+# P6(c): molecule_lock_scenarios is validated in discover.
+run_case "lock: list of names accepted" "$work/discover.sh" 0 "single_scenario/default" \
+  CHANGED_ROLES=single_scenario 'MOLECULE_LOCK_SCENARIOS=["single_scenario/default"]'
+run_case "lock: not a list fails" "$work/discover.sh" fail "" \
+  'MOLECULE_LOCK_SCENARIOS={"single_scenario": "default"}'
+run_case "lock: invalid JSON fails" "$work/discover.sh" fail "" 'MOLECULE_LOCK_SCENARIOS=["x"'
+
 if [[ $failures -ne 0 ]]; then
   echo "$failures case(s) failed"
   exit 1
