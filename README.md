@@ -1,6 +1,6 @@
 # github-action-workflows
 
-Reusable GitHub Actions workflows for Ansible collection CI.
+Reusable GitHub Actions workflows for Ansible collection CI and container image builds.
 
 ## Supported reusable workflows
 
@@ -52,9 +52,78 @@ Caching:
 
 - `setup-uv` caches uv downloads in the GitHub Actions cache on GitHub-hosted runners. On self-hosted runners uv's cache in `~/.cache/uv` and Galaxy content in `~/.ansible` stay on the runner between jobs, so no GitHub Actions cache is used there.
 
+### `.github/workflows/container-image.yml`
+
+Builds one container image from a Dockerfile with `docker build --pull`, pushes it with `skopeo` and can launch an AAP job template afterwards.
+
+- The image is labelled with `org.opencontainers.image.source` (the calling repository) and `org.opencontainers.image.revision` (the commit).
+- `push: false` (the default) only builds. The caller decides when to push, for example `push: ${{ github.event_name == 'push' }}`.
+- The pushed reference is `<registry>/<namespace>/<image>:<tag>` for every tag in `tags`. Without `tags`, the branch or tag name of the run is the tag.
+- The `deploy` job runs only after a push and only when `aap_job_template` is set. It launches the template with `aap_launch` as request body and fails unless the AAP job ends as `successful`.
+- A repository with several images calls the workflow once per image, for example from a matrix.
+
+Requirements:
+
+- The runner needs `docker`, `skopeo`, `curl` and `jq`. `quay.vbc.ac.at` and `tower.vbc.ac.at` need a self-hosted runner.
+- Grant `contents: read`.
+
+Inputs:
+
+- `image` (string, required): repository below the namespace, e.g. `netbox` or `galaxy/app`
+- `namespace` (string, default: `it`): organization in the registry
+- `registry` (string, default: `quay.vbc.ac.at`)
+- `registry_username` (string, default: `''`): robot account with write access to the namespace; required when `push: true`
+- `context` (string, default: `.`): build context, relative to the repository root
+- `dockerfile` (string, default: `Dockerfile`): relative to the repository root
+- `build_args` (string, default: `''`): newline-separated `KEY=VALUE` build arguments
+- `tags` (string, default: branch or tag name): newline-separated tags to push
+- `push` (boolean, default: `false`)
+- `platform` (string, default: `self-hosted`): runner to build on
+- `aap_job_template` (string, default: `''`): numeric ID of the AAP job template to launch after a push
+- `aap_launch` (string, default: `{}`): JSON body of the launch request, e.g. `{"job_tags": "reload", "extra_vars": {"tag": "main"}}`
+- `aap_url` (string, default: `https://tower.vbc.ac.at`)
+- `aap_timeout_minutes` (number, default: `60`)
+
+Secrets:
+
+- `registry_password` (optional): required when `push: true`
+- `aap_username`, `aap_password` (optional): required when `aap_job_template` is set
+
+Example:
+
+```yaml
+name: image
+
+on:
+    pull_request:
+    push:
+        branches: [main]
+        tags: ['*']
+
+jobs:
+    image:
+        permissions:
+            contents: read
+        uses: your-org/github-action-workflows/.github/workflows/container-image.yml@main
+        secrets:
+            registry_password: ${{ secrets.QUAY_PASSWORD }}
+            aap_username: ${{ secrets.AAP_USERNAME }}
+            aap_password: ${{ secrets.AAP_PASSWORD }}
+        with:
+            image: netbox
+            registry_username: it+github_pusher
+            build_args: |
+                NETBOX_VERSION=v4.6.10-5.0.2
+            push: ${{ github.event_name == 'push' }}
+            aap_job_template: ${{ github.ref_type == 'branch' && '123' || '' }}
+            aap_launch: '{"job_tags": "reload", "extra_vars": {"app_generic_image_tag": "main"}}'
+```
+
+The self-test builds `tests/container_image` without pushing.
+
 ## How to use
 
-Call the reusable workflow from your repository workflow:
+Call the `ansible-collection` workflow from your repository workflow:
 
 ```yaml
 name: collection-ci
