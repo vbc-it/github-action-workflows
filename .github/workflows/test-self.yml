@@ -10,9 +10,11 @@ permissions:
 
 jobs:
   ansible-collection-legacy:
-    # contents: write for the molecule_lock_scenarios lock branch.
+    # contents: write and actions: read for the molecule_lock_scenarios lock
+    # branch; only the molecule-lock and molecule-unlock jobs keep them.
     permissions:
       contents: write
+      actions: read
     uses: ./.github/workflows/ansible-collection.yml
     with:
       platform: ubuntu-latest
@@ -71,15 +73,17 @@ jobs:
           PYTHON: tests/ansible_collections/legacy_collection/.venv/bin/python
         run: tests/lock/test_lock.sh
 
-  # Two jobs of one run take the same lock through the real GitHub API; the
-  # check job proves they held it one after the other. The lock name is unique
-  # per run, so concurrent test-self runs never wait for each other here.
+  # Two jobs of one run take the same lock through the real GitHub API, as two
+  # calls of the workflow (different PLATFORM); the check job proves they held
+  # it one after the other. The lock name is unique per run, so concurrent
+  # test-self runs never wait for each other here.
   lock-queue:
     if: ${{ !github.event.pull_request.head.repo.fork }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
+      actions: read
     strategy:
       matrix:
         job: [1, 2]
@@ -90,27 +94,24 @@ jobs:
 
       - name: Extract the lock steps
         run: |
-          for step in "Acquire scenario lock" "Release scenario lock"; do
-            STEP="$step" yq '.jobs.molecule.steps[] | select(.name == strenv(STEP)) | .run' \
-              .github/workflows/ansible-collection.yml > "$RUNNER_TEMP/${step%% *}.sh"
-          done
+          yq '.jobs["molecule-lock"].steps[] | select(.name == "Acquire scenario locks") | .run' \
+            .github/workflows/ansible-collection.yml > "$RUNNER_TEMP/Acquire.sh"
+          yq '.jobs["molecule-unlock"].steps[] | select(.name == "Release scenario locks") | .run' \
+            .github/workflows/ansible-collection.yml > "$RUNNER_TEMP/Release.sh"
 
       - name: Acquire, hold and release the lock
         env:
           GH_TOKEN: ${{ github.token }}
           JOB: ${{ matrix.job }}
-          STALE_MINUTES: '10'
           LOCK_POLL_SECONDS: '3'
         run: |
-          export ROLE="test_self_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}" SCENARIO=queue
-          export GITHUB_OUTPUT="$RUNNER_TEMP/lock-output"
+          LOCKS=$(jq -cn --arg r "test_self_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}" '[{role: $r, scenario: "queue", is_native: false}]')
+          export LOCKS COLLECTION_PATH=. PLATFORM="lock-queue-$JOB"
           bash -eo pipefail "$RUNNER_TEMP/Acquire.sh"
           acquired=$(date +%s.%N)
           sleep 20
           released=$(date +%s.%N)
-          LOCK_BRANCH=$(sed -n 's/^branch=//p' "$GITHUB_OUTPUT") \
-            LOCK_COMMIT=$(sed -n 's/^commit=//p' "$GITHUB_OUTPUT") \
-            bash -eo pipefail "$RUNNER_TEMP/Release.sh"
+          bash -eo pipefail "$RUNNER_TEMP/Release.sh"
           mkdir -p "$RUNNER_TEMP/times"
           echo "$acquired $released" > "$RUNNER_TEMP/times/job-$JOB"
 

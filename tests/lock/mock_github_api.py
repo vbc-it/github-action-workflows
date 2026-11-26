@@ -1,8 +1,10 @@
-"""Minimal in-memory stand-in for the GitHub git refs API used by the
-molecule lock steps. Usage: python3 mock_github_api.py <port-file>
+"""Minimal in-memory stand-in for the GitHub git refs and workflow run APIs
+used by the molecule lock jobs. Usage: python3 mock_github_api.py <port-file>
 
-Token "readonly" gets 403 on writes. POST /_test/stale/<branch> creates a
-lock branch whose commit is one day old.
+Token "readonly" gets 403 on writes, token "noactions" 403 on workflow runs.
+Runs are in_progress unless set otherwise. Test helpers:
+  POST /_test/held/<run>/<branch>  lock branch held by run <run>, attempt 1
+  POST /_test/run/<run>/<status>   set the status of run <run>, attempt 1
 """
 
 import hashlib
@@ -15,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 LOCK = threading.Lock()
 OBJECTS = {}
 REFS = {}
+RUNS = {}
 PREFIX = "/repos/o/r/git/"
 
 
@@ -51,6 +54,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path
+        if path.startswith("/repos/o/r/actions/runs/"):
+            if self.headers.get("Authorization") == "Bearer noactions":
+                return self.reply(403, {"message": "Resource not accessible by integration"})
+            run = path[len("/repos/o/r/actions/runs/"):].split("/")[0]
+            with LOCK:
+                status = RUNS.get(run, "in_progress")
+            if status == "gone":
+                return self.reply(404, {"message": "Not Found"})
+            return self.reply(200, {"id": int(run), "status": status})
         with LOCK:
             if path.startswith(PREFIX + "ref/heads/"):
                 ref = "refs/heads/" + path[len(PREFIX + "ref/heads/"):]
@@ -65,14 +77,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path
-        if path.startswith("/_test/stale/"):
-            branch = path[len("/_test/stale/"):]
+        if path.startswith("/_test/held/"):
+            run, branch = path[len("/_test/held/"):].split("/", 1)
+            role, scenario = branch[len("molecule-lock/"):].split("/", 1)
+            message = (f"Molecule lock held by https://github.example/o/r/actions/runs/{run}"
+                       f"/attempts/1 {role}/{scenario} (00000000)")
             with LOCK:
                 sha = new_sha("commit", branch)
-                OBJECTS[sha] = {"sha": sha, "message": "old holder",
+                OBJECTS[sha] = {"sha": sha, "message": message,
                                 "committer": {"date": iso(time.time() - 86400)}}
                 REFS["refs/heads/" + branch] = sha
             return self.reply(201, {"sha": sha})
+        if path.startswith("/_test/run/"):
+            run, status = path[len("/_test/run/"):].split("/", 1)
+            with LOCK:
+                RUNS[run] = status
+            return self.reply(201, {})
         if self.readonly():
             return
         body = self.body()
