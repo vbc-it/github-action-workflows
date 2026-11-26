@@ -60,6 +60,7 @@ jobs:
       platform: ubuntu-latest
       collection-path: tests/ansible_collections/native_collection
       force_all_roles: true
+      molecule_max_parallel: 2
 
   container-image:
     uses: ./.github/workflows/container-image.yml
