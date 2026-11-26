@@ -181,6 +181,9 @@ jobs:
             force_all_roles: false
             publish_to_automationhub: false
             automationhub_url: https://automationhub.example.com/api/automation-hub/
+            # Optional: mirror Jenkins roleConfigs (unlisted roles still run all scenarios)
+            molecule_scenarios: '{"ssh": ["default", "hostbased"], "certificate": []}'
+            molecule_max_parallel: 4
 ```
 
 This workflow is tested in this repo with the `test_collection` sample using `.github/workflows/test-self.yml`.
