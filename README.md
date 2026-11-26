@@ -118,7 +118,7 @@ Builds one container image from a Dockerfile with `docker build --pull`, pushes 
 - The pushed reference is `<registry>/<namespace>/<image>:<tag>` for every tag in `tags`. Without `tags`, the branch or tag name of the run is the tag.
 - A build that pushes uses `--no-cache`, so it cannot reuse layers that another job on a shared docker daemon put in the build cache. `push: false` builds keep the cache.
 - The image is pushed by the image ID that `docker build --iidfile` wrote, not by its local tag, which another job on the same daemon could retag. The first tag is pushed from the daemon and every further tag is copied from that manifest digest in the registry; the job fails if a tag ends up with another digest. The digest is written to the job summary and returned as the `digest` and `image_ref` outputs.
-- The `deploy` job runs only after a push and only when `aap_job_template` is set. It launches the template with `aap_launch` as request body and fails unless the AAP job ends as `successful`.
+- The `deploy` job runs only after a push and only when `aap_job_template` is set. It launches the template with `aap_launch` as request body and fails unless the AAP job ends as `successful`. curl reads the AAP credentials as a config from a pipe, so they never appear in process arguments on the runner host.
 - A repository with several images calls the workflow once per image, for example from a matrix.
 
 Requirements:

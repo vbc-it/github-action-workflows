@@ -224,8 +224,15 @@ jobs:
           AAP_USERNAME: ${{ secrets.aap_username }}
           AAP_PASSWORD: ${{ secrets.aap_password }}
         run: |
+          set -o pipefail
+
           if [[ -z "$AAP_USERNAME" || -z "$AAP_PASSWORD" ]]; then
             echo "aap_job_template requires secrets.aap_username and secrets.aap_password." >&2
+            exit 1
+          fi
+
+          if [[ "${AAP_USERNAME}${AAP_PASSWORD}" == *[$'\n\r']* ]]; then
+            echo "secrets.aap_username and secrets.aap_password must not contain line breaks." >&2
             exit 1
           fi
 
@@ -234,11 +241,16 @@ jobs:
             exit 1
           fi
 
+          # curl reads the credentials as a config from a pipe, so they never appear in its
+          # arguments, which every process on the host can read from /proc/<pid>/cmdline.
+          credentials="${AAP_USERNAME}:${AAP_PASSWORD}"
+          credentials="${credentials//\\/\\\\}"
+          credentials="${credentials//\"/\\\"}"
           api="${AAP_URL%/}/api/controller/v2"
           aap() {
-            curl --fail-with-body --silent --show-error --max-time 60 \
-              --user "${AAP_USERNAME}:${AAP_PASSWORD}" \
-              --header 'Content-Type: application/json' "$@"
+            printf 'user = "%s"\n' "$credentials" |
+              curl --config - --fail-with-body --silent --show-error --max-time 60 \
+                --header 'Content-Type: application/json' "$@"
           }
 
           if ! launch=$(aap --request POST --data "$AAP_LAUNCH" "${api}/job_templates/${AAP_JOB_TEMPLATE}/launch/"); then
@@ -247,6 +259,10 @@ jobs:
           fi
 
           job=$(jq -r '.job' <<< "$launch")
+          if [[ ! "$job" =~ ^[0-9]+$ ]]; then
+            echo "::error::The AAP launch response has no job ID: ${launch}"
+            exit 1
+          fi
           job_url="${AAP_URL%/}/execution/jobs/playbook/${job}/output"
           echo "Launched [AAP job ${job}](${job_url})" >> "$GITHUB_STEP_SUMMARY"
 
