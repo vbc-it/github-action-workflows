@@ -105,6 +105,13 @@ on:
         required: false
         default: true
         type: boolean
+      allow_untested_publish:
+        description: >-
+          Allow publish_to_automationhub on tag runs that do not test all roles
+          (test_all_roles_on_tag false). Without it such runs fail in validate-release
+        required: false
+        default: false
+        type: boolean
       publish_runner:
         description: >-
           Runner label for the publish job. Automation Hub is only reachable from
@@ -138,6 +145,40 @@ jobs:
     permissions:
       contents: read
     steps:
+      # A tag usually points at a commit already on the default branch, so its
+      # changeset is empty: without testing all roles Molecule is skipped and
+      # check still passes. Mirrors the all_roles conditions of discover's
+      # "Set test scope" step.
+      - name: Require Molecule tests of all roles before publishing
+        if: ${{ inputs.publish_to_automationhub && github.ref_type == 'tag' }}
+        env:
+          FORCE_ALL_ROLES: ${{ inputs.force_all_roles }}
+          TEST_ALL_ROLES_ON_TAG: ${{ inputs.test_all_roles_on_tag }}
+          ALLOW_UNTESTED_PUBLISH: ${{ inputs.allow_untested_publish }}
+        run: |
+          if [[ "$FORCE_ALL_ROLES" == "true" || "$TEST_ALL_ROLES_ON_TAG" == "true" \
+            || "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            echo "All roles are tested before publishing."
+            exit 0
+          fi
+
+          msg="publish_to_automationhub=true with test_all_roles_on_tag=false (and force_all_roles=false)"
+          msg+=" tests only the roles changed by the tagged commit, usually none,"
+          msg+=" so the release can be published without any Molecule run."
+          if [[ "$ALLOW_UNTESTED_PUBLISH" == "true" ]]; then
+            echo "::warning title=Publishing without full Molecule tests::${msg} Allowed by allow_untested_publish=true."
+            {
+              echo "### Publishing without full Molecule tests"
+              echo
+              echo "${msg} Allowed by \`allow_untested_publish: true\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          msg+=" Set test_all_roles_on_tag or force_all_roles to true, or allow_untested_publish=true to accept this."
+          echo "::error title=Refusing to publish without full Molecule tests::${msg}"
+          exit 1
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
