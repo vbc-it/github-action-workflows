@@ -1,0 +1,25 @@
+# Version updates for pinned actions and the fixture lockfiles.
+# The cooldown keeps freshly published releases out for a week, so a
+# compromised release is more likely to be caught upstream before we adopt it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: uv
+    directories:
+      - /tests/ansible_collections/legacy_collection
+      - /tests/ansible_collections/native_collection
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      fixtures:
+        patterns: ["*"]
