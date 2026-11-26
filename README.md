@@ -47,9 +47,10 @@ Secrets:
 
 Publishing:
 
-- On tag runs with `publish_to_automationhub: true`, after `check` passes, `build-collection` builds the tarball on the `platform` runner without any secrets. It refuses tags that do not point to a commit on the default branch or whose version differs from the built tarball.
-- `publish-automationhub` runs on `publish_runner` in the `publish_environment` environment. It does not check out or install the repository: it downloads the tarball and uploads it with `ansible-galaxy` from a fixed `ansible-core` release. The token is passed through `ansible-galaxy`'s server configuration in the environment, never on the command line.
-- Protect the environment in the calling repository: required reviewers, and a deployment tag rule (e.g. `v*`). The `automationhub_token` secret can be stored as an environment secret there.
+- On tag runs with `publish_to_automationhub: true`, after `check` passes, `build-collection` builds the tarball on a fresh GitHub-hosted runner without any secrets, using a fixed `ansible-core` release; no code from the repository runs. It refuses tags that do not point to a commit on the default branch or whose version differs from the built tarball.
+- `publish-automationhub` runs on `publish_runner` in the `publish_environment` environment. It does not check out or install the repository: it downloads the tarball by artifact ID and uploads it with the same fixed `ansible-galaxy`, in a clean environment (temporary `HOME`, minimal `PATH`, empty Ansible config, freshly downloaded Python). The token is passed through `ansible-galaxy`'s server configuration in the environment, never on the command line.
+- The environment is the real release gate. In the calling repository, give it required reviewers and a deployment tag rule (e.g. `v*`), and store the token there as an environment secret named `AUTOMATIONHUB_TOKEN`: inside the publish job it takes precedence over a repository or organisation secret passed by the caller, and other branches cannot read it.
+- Point `publish_runner` at dedicated, ideally ephemeral, release runners: a runner that also executes test jobs can be tampered with by code from any branch.
 
 Tag validation:
 
