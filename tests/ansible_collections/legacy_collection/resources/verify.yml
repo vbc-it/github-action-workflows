@@ -11,3 +11,20 @@
       ansible.builtin.assert:
         that:
           - role_installed_marker.stat.exists
+
+    # The reusable workflow exports INSTANCE_ID per run attempt, role and
+    # scenario; skipped outside GitHub Actions.
+    - name: Assert INSTANCE_ID is unique to this run, role and scenario
+      when: lookup('ansible.builtin.env', 'GITHUB_RUN_ID') | length > 0
+      vars:
+        instance_id: "{{ lookup('ansible.builtin.env', 'INSTANCE_ID') }}"
+        expected_id: >-
+          {{ ((lookup('ansible.builtin.env', 'GITHUB_RUN_ID') ~ '-'
+          ~ lookup('ansible.builtin.env', 'GITHUB_RUN_ATTEMPT') ~ '-'
+          ~ (lookup('ansible.builtin.env', 'MOLECULE_PROJECT_DIRECTORY') | basename) ~ '-'
+          ~ lookup('ansible.builtin.env', 'MOLECULE_SCENARIO_NAME')) | hash('sha1'))[:16] }}
+      ansible.builtin.assert:
+        that:
+          - instance_id is match('^[0-9a-f]{16}$')
+          - instance_id == expected_id
+        fail_msg: "INSTANCE_ID={{ instance_id }}, expected {{ expected_id }}"
