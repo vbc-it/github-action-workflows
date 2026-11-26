@@ -60,6 +60,9 @@ Inputs:
 Secrets:
 
 - `automationhub_token` (optional): required only when `publish_to_automationhub=true` on a tag run
+- `op_service_account_token` (optional): 1Password service account token, exported as `OP_SERVICE_ACCOUNT_TOKEN` in the Molecule step only, and only when set (for the `community.general.onepassword` lookups). When it is set, the Molecule job installs the 1Password CLI `op` 2.35.0 with `1password/install-cli-action`, which downloads it into the runner's tool cache (no root needed), checks its GPG signature and puts it on `PATH`; the runner needs `gpg` and `unzip`
+- `galaxy_server_token` (optional): exported as `ANSIBLE_GALAXY_SERVER_PUBLISHED_TOKEN`, `..._RH_CERTIFIED_TOKEN`, `..._COMMUNITY_TOKEN` and `..._STAGING_TOKEN` in the Molecule step only, and only when set. The server list and URLs come from your Ansible configuration or `molecule_env_file`
+- Secrets are exported before `molecule_env_file` is sourced, so that file can override them. Pass them explicitly (or with `secrets: inherit`). GitHub does not pass secrets to `pull_request` runs from forks; do not work around that, since a fork's code would then receive them. Only pass them to runners you trust with them
 
 Publishing:
 

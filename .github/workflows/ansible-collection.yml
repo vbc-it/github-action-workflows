@@ -95,6 +95,12 @@ on:
       automationhub_token:
         description: 'Token for publishing to private Automation Hub'
         required: false
+      op_service_account_token:
+        description: '1Password service account token, exported as OP_SERVICE_ACCOUNT_TOKEN for Molecule; also installs the op CLI'
+        required: false
+      galaxy_server_token:
+        description: 'Token exported as ANSIBLE_GALAXY_SERVER_{PUBLISHED,RH_CERTIFIED,COMMUNITY,STAGING}_TOKEN for Molecule'
+        required: false
 
 jobs:
 
@@ -678,6 +684,26 @@ jobs:
         run: uv sync --locked --dev
         working-directory: ${{ inputs.collection-path }}
 
+      - name: Check whether the op CLI is needed
+        id: op
+        env:
+          OP_TOKEN_SECRET: ${{ secrets.op_service_account_token }}
+        run: |
+          if [[ -n "$OP_TOKEN_SECRET" ]]; then
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Downloads a fixed op release into the tool cache (no root needed) and
+      # verifies its GPG signature against 1Password's key bundled in the
+      # action. Needs gpg and unzip on the runner.
+      - name: Install 1Password CLI
+        if: steps.op.outputs.needed == 'true'
+        uses: 1password/install-cli-action@1a3160d5e9de1ae0803eaa08a88746f5ae3daa50 # v4.1.0
+        with:
+          version: "2.35.0"
+
       - name: Run molecule tests for role ${{ matrix.role }} scenario ${{ matrix.scenario }}
         run: |
           # shellcheck disable=SC1090
@@ -687,6 +713,19 @@ jobs:
           # molecule_env_file, which may override it.
           INSTANCE_ID=$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ROLE}-${SCENARIO}" | sha1sum | cut -c1-16)
           export INSTANCE_ID
+
+          # Optional secrets, exported only when set. molecule_env_file can still override them.
+          if [[ -n "$OP_TOKEN_SECRET" ]]; then
+            export OP_SERVICE_ACCOUNT_TOKEN="$OP_TOKEN_SECRET"
+            op --version
+          fi
+          if [[ -n "$GALAXY_TOKEN_SECRET" ]]; then
+            for server in PUBLISHED RH_CERTIFIED COMMUNITY STAGING; do
+              export "ANSIBLE_GALAXY_SERVER_${server}_TOKEN=$GALAXY_TOKEN_SECRET"
+            done
+          fi
+          unset OP_TOKEN_SECRET GALAXY_TOKEN_SECRET
+
           if [[ -n "$MOLECULE_ENV_FILE" ]]; then
             # shellcheck disable=SC1090
             set -a && source "$MOLECULE_ENV_FILE" && set +a
@@ -701,6 +740,8 @@ jobs:
         env:
           COLLECTION_PATH: ${{ inputs.collection-path }}
           MOLECULE_ENV_FILE: ${{ inputs.molecule_env_file }}
+          OP_TOKEN_SECRET: ${{ secrets.op_service_account_token }}
+          GALAXY_TOKEN_SECRET: ${{ secrets.galaxy_server_token }}
           ROLE: ${{ matrix.role }}
           SCENARIO: ${{ matrix.scenario }}
           PY_COLORS: '1'
