@@ -379,6 +379,7 @@ jobs:
           REGISTRY_USERNAME: ${{ inputs.registry_username }}
           REGISTRY_PASSWORD: ${{ secrets.registry_password }}
           TAGS: ${{ inputs.tags }}
+          BUILD_REF: ${{ inputs.ref }}
           BUILT_DIGEST: ${{ needs.build.outputs.digest }}
           OIDC_NEEDED: ${{ inputs.sign || inputs.provenance }}
         run: |
@@ -398,6 +399,12 @@ jobs:
           # Without tags the ref name is the tag. A branch must not be able to
           # overwrite release or moving tags just by its name.
           if [[ -z "${TAGS//[[:space:]]/}" ]]; then
+            # With ref, the image is built from another commit than the run's ref,
+            # so the run's ref name would label the wrong code.
+            if [[ -n "$BUILD_REF" ]]; then
+              echo "ref '${BUILD_REF}' builds another commit than this run; set tags explicitly." >&2
+              exit 1
+            fi
             if [[ "$GITHUB_REF_TYPE" == "branch" && "$GITHUB_REF_NAME" =~ ^(latest|stable|v?[0-9].*)$ ]]; then
               echo "Branch '${GITHUB_REF_NAME}' looks like a release or moving tag; set tags explicitly to push a branch with that name." >&2
               exit 1

@@ -199,7 +199,7 @@ Inputs:
 - `namespace` (string, default: `it`): organization in the registry
 - `registry` (string, default: `quay.vbc.ac.at`)
 - `registry_username` (string, default: `''`): robot account with write access to the namespace; required when `push: true`
-- `ref` (string, default: ref of the run): branch, tag or commit of the calling repository to build, e.g. an existing git tag chosen in a `workflow_dispatch` run
+- `ref` (string, default: ref of the run): branch, tag or commit of the calling repository to build, e.g. an existing git tag chosen in a `workflow_dispatch` run. With `ref` set, `push: true` requires explicit `tags`, because the run's ref name would label a different commit
 - `context` (string, default: `.`): build context, relative to the repository root
 - `dockerfile` (string, default: `Dockerfile`): relative to the repository root
 - `build_args` (string, default: `''`): newline-separated `KEY=VALUE` build arguments; visible in the image history, never use them for credentials
