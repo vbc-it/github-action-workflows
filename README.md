@@ -116,7 +116,9 @@ Builds one container image from a Dockerfile with `docker build --pull`, pushes 
 - The image is labelled with `org.opencontainers.image.source` (the calling repository) and `org.opencontainers.image.revision` (the commit).
 - `push: false` (the default) only builds. The caller decides when to push, for example `push: ${{ github.event_name == 'push' }}`.
 - The pushed reference is `<registry>/<namespace>/<image>:<tag>` for every tag in `tags`. Without `tags`, the branch or tag name of the run is the tag.
-- The `deploy` job runs only after a push and only when `aap_job_template` is set. It launches the template with `aap_launch` as request body and fails unless the AAP job ends as `successful`.
+- A build that pushes uses `--no-cache`, so it cannot reuse layers that another job on a shared docker daemon put in the build cache. `push: false` builds keep the cache.
+- The image is pushed by the image ID that `docker build --iidfile` wrote, not by its local tag, which another job on the same daemon could retag. The first tag is pushed from the daemon and every further tag is copied from that manifest digest in the registry; the job fails if a tag ends up with another digest. The digest is written to the job summary and returned as the `digest` and `image_ref` outputs.
+- The `deploy` job runs only after a push and only when `aap_job_template` is set. It launches the template with `aap_launch` as request body and fails unless the AAP job ends as `successful`. curl reads the AAP credentials as a config from a pipe, so they never appear in process arguments on the runner host.
 - A repository with several images calls the workflow once per image, for example from a matrix.
 
 Requirements:
@@ -146,6 +148,11 @@ Secrets:
 
 - `registry_password` (optional): required when `push: true`
 - `aap_username`, `aap_password` (optional): required when `aap_job_template` is set
+
+Outputs:
+
+- `digest`: manifest digest of the pushed image, e.g. `sha256:...`; empty when `push: false`
+- `image_ref`: `<registry>/<namespace>/<image>@<digest>`; empty when `push: false`
 
 Example:
 
