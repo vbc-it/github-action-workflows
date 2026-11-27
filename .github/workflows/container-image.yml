@@ -188,13 +188,23 @@ jobs:
               --header 'Content-Type: application/json' "$@"
           }
 
-          job=$(aap --request POST --data "$AAP_LAUNCH" "${api}/job_templates/${AAP_JOB_TEMPLATE}/launch/" | jq -r '.job')
+          if ! launch=$(aap --request POST --data "$AAP_LAUNCH" "${api}/job_templates/${AAP_JOB_TEMPLATE}/launch/"); then
+            echo "::error::AAP refused to launch job template ${AAP_JOB_TEMPLATE}: ${launch}"
+            exit 1
+          fi
+
+          job=$(jq -r '.job' <<< "$launch")
           job_url="${AAP_URL%/}/execution/jobs/playbook/${job}/output"
           echo "Launched [AAP job ${job}](${job_url})" >> "$GITHUB_STEP_SUMMARY"
 
           # The job timeout ends the wait for a job that never finishes.
           while true; do
-            status=$(aap "${api}/jobs/${job}/" | jq -r '.status')
+            if ! job_details=$(aap "${api}/jobs/${job}/"); then
+              echo "::error::AAP did not return job ${job}: ${job_details}"
+              exit 1
+            fi
+
+            status=$(jq -r '.status' <<< "$job_details")
             echo "job ${job}: ${status}"
             case "$status" in
               successful) exit 0 ;;
