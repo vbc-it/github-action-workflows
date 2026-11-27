@@ -38,12 +38,14 @@ on:
         default: 'Dockerfile'
         type: string
       build_args:
-        description: 'Newline-separated KEY=VALUE build arguments'
+        description: 'Newline-separated KEY=VALUE build arguments; they are visible in the image history, use build_secrets for credentials'
         required: false
         default: ''
         type: string
       tags:
-        description: 'Newline-separated tags to push; defaults to the branch or tag name of the run'
+        description: >-
+          Newline-separated tags to push; defaults to the branch or tag name of the run. A branch
+          name that looks like a release or moving tag (latest, stable, v1.2, 1.2) is refused
         required: false
         default: ''
         type: string
@@ -52,10 +54,52 @@ on:
         required: false
         default: false
         type: boolean
+      sbom:
+        description: >-
+          Generate an SPDX SBOM of the image with syft and upload it as an artifact; with sign, it is
+          also attached to the pushed digest as a signed attestation
+        required: false
+        default: false
+        type: boolean
+      sign:
+        description: >-
+          Sign the pushed digest with cosign keyless signing (GitHub OIDC, public Sigstore); the calling
+          job must grant id-token: write
+        required: false
+        default: false
+        type: boolean
+      provenance:
+        description: >-
+          Create a GitHub artifact attestation (SLSA build provenance) for the pushed digest; the calling
+          job must grant id-token: write and attestations: write
+        required: false
+        default: false
+        type: boolean
       platform:
-        description: 'Runner to build on; it needs docker, skopeo, curl and jq'
+        description: 'Runner to build on; it needs docker, skopeo and tar'
         required: false
         default: 'self-hosted'
+        type: string
+      push_runner:
+        description: >-
+          Runner for the push and deploy jobs; it needs skopeo, curl and jq. Empty uses platform.
+          Use a label that only runners you trust with the registry and AAP credentials carry
+        required: false
+        default: ''
+        type: string
+      push_environment:
+        description: >-
+          GitHub environment of the push job in the calling repository. Protect it with required
+          reviewers and deployment branch or tag rules; store REGISTRY_PASSWORD there
+        required: false
+        default: 'registry'
+        type: string
+      deploy_environment:
+        description: >-
+          GitHub environment of the deploy job in the calling repository. Protect it with required
+          reviewers and deployment branch or tag rules; store AAP_USERNAME and AAP_PASSWORD there
+        required: false
+        default: 'aap'
         type: string
       aap_job_template:
         description: 'ID of an AAP job template to launch after a push; empty launches nothing'
@@ -66,6 +110,13 @@ on:
         description: 'JSON body of the AAP launch request, e.g. {"job_tags": "reload", "extra_vars": {"tag": "main"}}'
         required: false
         default: '{}'
+        type: string
+      aap_image_var:
+        description: >-
+          Name of the extra var that the deploy job sets in aap_launch to the pushed image as
+          <registry>/<namespace>/<image>@<digest>; empty sets none
+        required: false
+        default: 'container_image_ref'
         type: string
       aap_url:
         description: 'Base URL of the AAP controller'
@@ -78,6 +129,11 @@ on:
         default: 60
         type: number
     secrets:
+      build_secrets:
+        description: >-
+          Newline-separated ID=VALUE BuildKit secrets for docker build --secret, used in the Dockerfile with
+          RUN --mount=type=secret,id=ID; the only place for credentials the build needs
+        required: false
       registry_password:
         description: 'Password of registry_username; required when push is true'
         required: false
@@ -87,14 +143,27 @@ on:
       aap_password:
         description: 'Password of aap_username'
         required: false
+    outputs:
+      digest:
+        description: 'Manifest digest of the pushed image; empty when push is false'
+        value: ${{ jobs.push.outputs.digest }}
+      image_ref:
+        description: 'Pushed image as <registry>/<namespace>/<image>@<digest>; empty when push is false'
+        value: ${{ jobs.push.outputs.image_ref }}
 
 jobs:
 
+  # Builds the caller's Dockerfile without any registry or AAP credentials and
+  # hands the image to the push job as an OCI archive artifact.
   build:
     runs-on: ${{ inputs.platform }}
     timeout-minutes: 120
     permissions:
       contents: read
+    outputs:
+      digest: ${{ steps.export.outputs.digest }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      sbom-artifact-id: ${{ steps.upload-sbom.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -102,21 +171,56 @@ jobs:
           persist-credentials: false
 
       # Callers build several images of one run in parallel on runners that can share a docker daemon.
-      - name: Name the local image and the registry auth file after the run and the image
+      - name: Name the local image and the archive after the run and the image
         env:
           IMAGE: ${{ inputs.image }}
         run: |
           build="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(printf '%s' "$IMAGE" | sha256sum | cut -c1-12)"
-          echo "LOCAL_IMAGE=localhost/container-image:${build}" >> "$GITHUB_ENV"
-          echo "REGISTRY_AUTH_FILE=${RUNNER_TEMP}/registry-auth-${build}.json" >> "$GITHUB_ENV"
+          {
+            echo "BUILD_NAME=${build}"
+            echo "LOCAL_IMAGE=localhost/container-image:${build}"
+            echo "IMAGE_ID_FILE=${RUNNER_TEMP}/image-id-${build}"
+            echo "ARCHIVE_DIR=${RUNNER_TEMP}/image-${build}"
+            echo "SBOM_DIR=${RUNNER_TEMP}/sbom-${build}"
+            echo "SECRETS_DIR=${RUNNER_TEMP}/build-secrets-${build}"
+          } >> "$GITHUB_ENV"
 
       - name: Build image
         env:
           CONTEXT: ${{ inputs.context }}
           DOCKERFILE: ${{ inputs.dockerfile }}
           BUILD_ARGS: ${{ inputs.build_args }}
+          BUILD_SECRETS: ${{ secrets.build_secrets }}
+          PUSH: ${{ inputs.push }}
         run: |
           arguments=()
+          # BuildKit mounts each secret only into the RUN steps that ask for it; unlike
+          # build arguments it is not stored in the image or its history. Each value is
+          # passed as a file readable only by the runner user, never on the command line.
+          if [[ -n "$BUILD_SECRETS" ]]; then
+            rm -rf "$SECRETS_DIR"
+            install -d -m 700 "$SECRETS_DIR"
+            while IFS= read -r line; do
+              if [[ -z "$line" ]]; then
+                continue
+              fi
+              id="${line%%=*}"
+              if [[ "$line" != *=* || ! "$id" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]]; then
+                echo "Every line of secrets.build_secrets must be ID=VALUE, with an ID of letters, digits, '_', '.' and '-'." >&2
+                exit 1
+              fi
+              value="${line#*=}"
+              if [[ -n "$value" ]]; then
+                echo "::add-mask::${value}"
+              fi
+              (umask 077 && printf '%s' "$value" > "${SECRETS_DIR}/${id}")
+              arguments+=(--secret "id=${id},src=${SECRETS_DIR}/${id}")
+            done <<< "$BUILD_SECRETS"
+          fi
+          # Another job on a shared docker daemon could have poisoned the build cache.
+          if [[ "$PUSH" == "true" ]]; then
+            arguments+=(--no-cache)
+          fi
           while IFS= read -r build_arg; do
             if [[ -n "$build_arg" ]]; then
               arguments+=(--build-arg "$build_arg")
@@ -128,44 +232,274 @@ jobs:
             --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
             "${arguments[@]}" \
+            --iidfile "$IMAGE_ID_FILE" \
             --tag "$LOCAL_IMAGE" \
             "$CONTEXT"
+          rm -rf "$SECRETS_DIR"
+
+      # The manifest digest is fixed here: the push job copies the archive with
+      # --preserve-digests and fails if the registry ends up with another digest.
+      - name: Export image as OCI archive
+        id: export
+        if: ${{ inputs.push || inputs.sbom }}
+        run: |
+          # Export by the content-addressed image ID: another job on a shared docker daemon can retag LOCAL_IMAGE.
+          image_id=$(cat "$IMAGE_ID_FILE")
+          if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "docker build wrote no valid image ID to ${IMAGE_ID_FILE}." >&2
+            exit 1
+          fi
+
+          rm -rf "$ARCHIVE_DIR"
+          mkdir -p "$ARCHIVE_DIR"
+          skopeo copy --digestfile "${ARCHIVE_DIR}.digest" "docker-daemon:${image_id}" "oci-archive:${ARCHIVE_DIR}/image.tar"
+          digest=$(cat "${ARCHIVE_DIR}.digest")
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "skopeo wrote no valid manifest digest." >&2
+            exit 1
+          fi
+          echo "Built image ID \`${image_id}\`, manifest digest \`${digest}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload image archive
+        id: upload
+        if: ${{ inputs.push }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: container-image-${{ env.BUILD_NAME }}
+          path: ${{ env.ARCHIVE_DIR }}/image.tar
+          if-no-files-found: error
+          retention-days: 1
+          # The layers are already compressed.
+          compression-level: 0
+
+      # syft is downloaded from its GitHub release and checked against a pinned checksum.
+      - name: Generate SBOM
+        if: ${{ inputs.sbom }}
+        env:
+          REPOSITORY: ${{ inputs.registry }}/${{ inputs.namespace }}/${{ inputs.image }}
+          DIGEST: ${{ steps.export.outputs.digest }}
+          SYFT_VERSION: '1.57.0'
+          SYFT_SHA256_AMD64: '9c077a7d43029b3b13e98a8db720661e700c4d58db6352153a06395ae4a2a704'
+          SYFT_SHA256_ARM64: '410cbfa0ae0f63246bc0057843760b1de2833cd23919e025e368fd7681308cdb'
+          SYFT_CHECK_FOR_APP_UPDATE: 'false'
+        run: |
+          case "$(uname -m)" in
+            x86_64) arch=amd64 checksum="$SYFT_SHA256_AMD64" ;;
+            aarch64|arm64) arch=arm64 checksum="$SYFT_SHA256_ARM64" ;;
+            *) echo "No pinned syft build for $(uname -m)." >&2; exit 1 ;;
+          esac
+          rm -rf "$SBOM_DIR"
+          mkdir -p "$SBOM_DIR/syft"
+          tarball="$SBOM_DIR/syft/syft.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 --output "$tarball" \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_${arch}.tar.gz"
+          echo "${checksum}  ${tarball}" | sha256sum --check --strict -
+          tar -xzf "$tarball" -C "$SBOM_DIR/syft" syft
+
+          "$SBOM_DIR/syft/syft" scan --quiet "oci-archive:${ARCHIVE_DIR}/image.tar" \
+            --source-name "$REPOSITORY" --source-version "$DIGEST" \
+            --output "spdx-json=${SBOM_DIR}/sbom.spdx.json"
+          echo "SBOM: $(jq '.packages | length' "${SBOM_DIR}/sbom.spdx.json") packages" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload SBOM
+        id: upload-sbom
+        if: ${{ inputs.sbom }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-${{ env.BUILD_NAME }}
+          path: ${{ env.SBOM_DIR }}/sbom.spdx.json
+          if-no-files-found: error
+
+      - name: Remove local image, archive and build secrets
+        if: ${{ always() }}
+        run: |
+          docker image rm --force "$LOCAL_IMAGE" || true
+          rm -rf "$IMAGE_ID_FILE" "$ARCHIVE_DIR" "${ARCHIVE_DIR}.digest" "$SBOM_DIR" "$SECRETS_DIR"
+
+  # Runs no code from the calling repository: it only copies the archive that
+  # build produced. The environment holds the registry password and is where
+  # callers require reviewers and restrict branches and tags.
+  push:
+    needs: build
+    if: ${{ inputs.push }}
+    runs-on: ${{ inputs.push_runner || inputs.platform }}
+    environment: ${{ inputs.push_environment }}
+    timeout-minutes: 60
+    # No permissions key: the job gets the token as the caller grants it, so that
+    # sign and provenance can use id-token: write and attestations: write without
+    # every caller having to grant them (a job that requests more than the caller
+    # grants stops the whole run). Nothing in this job uses the repository token
+    # otherwise; the caller should grant only contents: read plus what sign and
+    # provenance need.
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      image_ref: ${{ steps.push.outputs.image_ref }}
+    steps:
+      - name: Name the archive and the registry auth file after the run and the image
+        env:
+          IMAGE: ${{ inputs.image }}
+        run: |
+          build="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(printf '%s' "$IMAGE" | sha256sum | cut -c1-12)"
+          {
+            echo "ARCHIVE_DIR=${RUNNER_TEMP}/image-${build}"
+            echo "SBOM_DIR=${RUNNER_TEMP}/sbom-${build}"
+            # skopeo reads REGISTRY_AUTH_FILE, cosign reads config.json in DOCKER_CONFIG.
+            echo "REGISTRY_AUTH_FILE=${RUNNER_TEMP}/registry-auth-${build}/config.json"
+            echo "DOCKER_CONFIG=${RUNNER_TEMP}/registry-auth-${build}"
+          } >> "$GITHUB_ENV"
+
+      - name: Download image archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ env.ARCHIVE_DIR }}
+
+      - name: Download SBOM
+        if: ${{ inputs.sign && inputs.sbom }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.sbom-artifact-id }}
+          path: ${{ env.SBOM_DIR }}
+
+      # Installed before the push, so that a failed install does not leave an unsigned image.
+      # The installer checks the downloaded cosign against a pinned checksum.
+      - name: Install cosign
+        if: ${{ inputs.sign }}
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: 'v3.1.4'
+          install-dir: ${{ runner.temp }}/cosign
 
       - name: Push image
-        if: ${{ inputs.push }}
+        id: push
         env:
           REGISTRY: ${{ inputs.registry }}
           REPOSITORY: ${{ inputs.registry }}/${{ inputs.namespace }}/${{ inputs.image }}
           REGISTRY_USERNAME: ${{ inputs.registry_username }}
           REGISTRY_PASSWORD: ${{ secrets.registry_password }}
-          TAGS: ${{ inputs.tags || github.ref_name }}
+          TAGS: ${{ inputs.tags }}
+          BUILD_REF: ${{ inputs.ref }}
+          BUILT_DIGEST: ${{ needs.build.outputs.digest }}
+          OIDC_NEEDED: ${{ inputs.sign || inputs.provenance }}
         run: |
+          set -o pipefail
+
           if [[ -z "$REGISTRY_USERNAME" || -z "$REGISTRY_PASSWORD" ]]; then
             echo "push=true requires registry_username and secrets.registry_password." >&2
             exit 1
           fi
 
-          skopeo login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin <<< "$REGISTRY_PASSWORD"
+          # Fail before pushing rather than leave an unsigned image behind.
+          if [[ "$OIDC_NEEDED" == "true" && -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
+            echo "sign and provenance need id-token: write in the permissions of the calling job." >&2
+            exit 1
+          fi
 
+          # Without tags the ref name is the tag. A branch must not be able to
+          # overwrite release or moving tags just by its name.
+          if [[ -z "${TAGS//[[:space:]]/}" ]]; then
+            # With ref, the image is built from another commit than the run's ref,
+            # so the run's ref name would label the wrong code.
+            if [[ -n "$BUILD_REF" ]]; then
+              echo "ref '${BUILD_REF}' builds another commit than this run; set tags explicitly." >&2
+              exit 1
+            fi
+            if [[ "$GITHUB_REF_TYPE" == "branch" && "$GITHUB_REF_NAME" =~ ^(latest|stable|v?[0-9].*)$ ]]; then
+              echo "Branch '${GITHUB_REF_NAME}' looks like a release or moving tag; set tags explicitly to push a branch with that name." >&2
+              exit 1
+            fi
+            TAGS="$GITHUB_REF_NAME"
+          fi
+
+          tags=()
           while IFS= read -r tag; do
             if [[ -z "$tag" ]]; then
               continue
             fi
-
-            skopeo copy "docker-daemon:${LOCAL_IMAGE}" "docker://${REPOSITORY}:${tag}"
-            echo "Pushed \`${REPOSITORY}:${tag}\`" >> "$GITHUB_STEP_SUMMARY"
+            if [[ ! "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+              echo "'${tag}' is not a valid image tag." >&2
+              exit 1
+            fi
+            tags+=("$tag")
           done <<< "$TAGS"
+          if [[ ${#tags[@]} -eq 0 ]]; then
+            echo "No tag to push." >&2
+            exit 1
+          fi
 
-      - name: Remove local image and registry credentials
+          # Check the archive before any credential is used: its manifest must
+          # be the one that build reported.
+          if [[ ! "$BUILT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "The build job reported no valid manifest digest." >&2
+            exit 1
+          fi
+          archive="${ARCHIVE_DIR}/image.tar"
+          archive_digest="sha256:$(skopeo inspect --raw "oci-archive:${archive}" | sha256sum | cut -d' ' -f1)"
+          if [[ "$archive_digest" != "$BUILT_DIGEST" ]]; then
+            echo "The image archive has manifest digest ${archive_digest}, but build reported ${BUILT_DIGEST}." >&2
+            exit 1
+          fi
+
+          install -d -m 700 "$DOCKER_CONFIG"
+          skopeo login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin <<< "$REGISTRY_PASSWORD"
+
+          # The first tag is pushed from the archive; later tags copy that manifest by digest within the registry.
+          digest_file="${ARCHIVE_DIR}.digest"
+          digest="$BUILT_DIGEST"
+          for index in "${!tags[@]}"; do
+            tag="${tags[$index]}"
+            if [[ "$index" -eq 0 ]]; then
+              skopeo copy --preserve-digests --digestfile "$digest_file" "oci-archive:${archive}" "docker://${REPOSITORY}:${tag}"
+            else
+              skopeo copy --preserve-digests --digestfile "$digest_file" "docker://${REPOSITORY}@${digest}" "docker://${REPOSITORY}:${tag}"
+            fi
+            if [[ "$(cat "$digest_file")" != "$digest" ]]; then
+              echo "${REPOSITORY}:${tag} got digest $(cat "$digest_file") instead of ${digest}." >&2
+              exit 1
+            fi
+            echo "Pushed \`${REPOSITORY}:${tag}\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo "Digest: \`${REPOSITORY}@${digest}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${REPOSITORY}@${digest}" >> "$GITHUB_OUTPUT"
+
+      # Keyless: cosign gets a short-lived certificate for the workflow identity from
+      # Fulcio and logs the signature in Rekor (public Sigstore instance).
+      - name: Sign image
+        if: ${{ inputs.sign }}
+        env:
+          IMAGE_REF: ${{ steps.push.outputs.image_ref }}
+          SBOM: ${{ inputs.sbom }}
+          COSIGN: ${{ runner.temp }}/cosign/cosign
+        run: |
+          "$COSIGN" sign --yes "$IMAGE_REF"
+          echo "Signed \`${IMAGE_REF}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$SBOM" == "true" ]]; then
+            "$COSIGN" attest --yes --type spdxjson --predicate "${SBOM_DIR}/sbom.spdx.json" "$IMAGE_REF"
+            echo "Attached the SBOM as a signed SPDX attestation" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Attest build provenance
+        if: ${{ inputs.provenance }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ inputs.registry }}/${{ inputs.namespace }}/${{ inputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: false
+
+      - name: Remove archive and registry credentials
         if: ${{ always() }}
         run: |
-          docker image rm --force "$LOCAL_IMAGE" || true
-          rm -f "$REGISTRY_AUTH_FILE"
+          rm -rf "$DOCKER_CONFIG" "$ARCHIVE_DIR" "${ARCHIVE_DIR}.digest" "$SBOM_DIR"
 
   deploy:
-    needs: build
+    needs: push
     if: ${{ inputs.push && inputs.aap_job_template != '' }}
-    runs-on: ${{ inputs.platform }}
+    # tower.vbc.ac.at is only reachable from internal runners.
+    runs-on: ${{ inputs.push_runner || inputs.platform }}
+    environment: ${{ inputs.deploy_environment }}
     timeout-minutes: ${{ inputs.aap_timeout_minutes }}
     permissions: {}
     steps:
@@ -174,11 +508,20 @@ jobs:
           AAP_URL: ${{ inputs.aap_url }}
           AAP_JOB_TEMPLATE: ${{ inputs.aap_job_template }}
           AAP_LAUNCH: ${{ inputs.aap_launch }}
+          AAP_IMAGE_VAR: ${{ inputs.aap_image_var }}
+          IMAGE_REF: ${{ needs.push.outputs.image_ref }}
           AAP_USERNAME: ${{ secrets.aap_username }}
           AAP_PASSWORD: ${{ secrets.aap_password }}
         run: |
+          set -o pipefail
+
           if [[ -z "$AAP_USERNAME" || -z "$AAP_PASSWORD" ]]; then
             echo "aap_job_template requires secrets.aap_username and secrets.aap_password." >&2
+            exit 1
+          fi
+
+          if [[ "${AAP_USERNAME}${AAP_PASSWORD}" == *[$'\n\r']* ]]; then
+            echo "secrets.aap_username and secrets.aap_password must not contain line breaks." >&2
             exit 1
           fi
 
@@ -187,21 +530,48 @@ jobs:
             exit 1
           fi
 
+          # Deploy by digest: a tag can move between the push and the launch.
+          if [[ -n "$AAP_IMAGE_VAR" && ! "$IMAGE_REF" =~ @sha256:[0-9a-f]{64}$ ]]; then
+            echo "The push job reported no image digest." >&2
+            exit 1
+          fi
+          launch=$(jq -c --arg var "$AAP_IMAGE_VAR" --arg ref "$IMAGE_REF" '
+            if type != "object" then error("aap_launch must be a JSON object") else . end
+            | if $var == "" then . else
+                .extra_vars = ((.extra_vars // {})
+                  | if type == "string" then fromjson else . end
+                  | if type != "object" then error("extra_vars in aap_launch must be a JSON object") else . end
+                  | .[$var] = $ref)
+              end' <<< "$AAP_LAUNCH")
+
+          # curl reads the credentials as a config from a pipe, so they never appear in its
+          # arguments, which every process on the host can read from /proc/<pid>/cmdline.
+          credentials="${AAP_USERNAME}:${AAP_PASSWORD}"
+          credentials="${credentials//\\/\\\\}"
+          credentials="${credentials//\"/\\\"}"
           api="${AAP_URL%/}/api/controller/v2"
           aap() {
-            curl --fail-with-body --silent --show-error --max-time 60 \
-              --user "${AAP_USERNAME}:${AAP_PASSWORD}" \
-              --header 'Content-Type: application/json' "$@"
+            printf 'user = "%s"\n' "$credentials" |
+              curl --config - --fail-with-body --silent --show-error --max-time 60 \
+                --header 'Content-Type: application/json' "$@"
           }
 
-          if ! launch=$(aap --request POST --data "$AAP_LAUNCH" "${api}/job_templates/${AAP_JOB_TEMPLATE}/launch/"); then
-            echo "::error::AAP refused to launch job template ${AAP_JOB_TEMPLATE}: ${launch}"
+          if ! response=$(aap --request POST --data "$launch" "${api}/job_templates/${AAP_JOB_TEMPLATE}/launch/"); then
+            echo "::error::AAP refused to launch job template ${AAP_JOB_TEMPLATE}: ${response}"
             exit 1
           fi
 
-          job=$(jq -r '.job' <<< "$launch")
+          job=$(jq -r '.job' <<< "$response")
+          if [[ ! "$job" =~ ^[0-9]+$ ]]; then
+            echo "::error::The AAP launch response has no job ID: ${response}"
+            exit 1
+          fi
           job_url="${AAP_URL%/}/execution/jobs/playbook/${job}/output"
           echo "Launched [AAP job ${job}](${job_url})" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n "$AAP_IMAGE_VAR" ]] && jq -e '.ignored_fields.extra_vars? // empty' <<< "$response" > /dev/null; then
+            echo "::warning::AAP ignored extra_vars, so the job does not get ${AAP_IMAGE_VAR}." \
+              "Enable 'Prompt on launch' for variables in job template ${AAP_JOB_TEMPLATE}."
+          fi
 
           # The job timeout ends the wait for a job that never finishes.
           while true; do

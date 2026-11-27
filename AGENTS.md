@@ -6,7 +6,7 @@ Guidance for coding agents working in this repository.
 
 - This repository provides reusable GitHub Actions workflows for Ansible collection CI.
 - Primary workflow under development is [ansible-collection](.github/workflows/ansible-collection.yml).
-- [container-image](.github/workflows/container-image.yml) builds one image with `docker build`, pushes it with `skopeo` and optionally launches an AAP job template. Its fixture is `tests/container_image`; pushing and the AAP launch are not covered by the self-test.
+- [container-image](.github/workflows/container-image.yml) builds one image with `docker build` in a job without secrets, hands it over as an OCI archive artifact to a `push` job (caller's `push_environment`) that pushes it with `skopeo --preserve-digests`, and optionally launches an AAP job template by digest from a `deploy` job (caller's `deploy_environment`). Keep credentials out of `build` (except the caller's `build_secrets`); `sign`/`provenance` run in `push`, which therefore declares no `permissions` and inherits the caller's grant. Its fixture is `tests/container_image` (checks a build secret; self-test also runs `sbom`); pushing, signing, provenance and the AAP launch are not covered by the self-test.
 - Self-test entrypoint is [test-self](.github/workflows/test-self.yml).
 
 ## First Files To Read
@@ -31,7 +31,7 @@ Run from repository root unless noted otherwise.
   - `cd tests/ansible_collections/native_collection && uv run molecule list -f yaml`
 - Discover step unit tests (needs bash 4+, jq and both fixtures synced):
   - `tests/discover/test_discover.sh`
-- Lock step tests against a mock GitHub API (needs bash 4+, curl, jq, PyYAML):
+- Lock job and Molecule plan tests against a mock GitHub API (needs bash 4+, curl, jq, PyYAML):
   - `PYTHON=tests/ansible_collections/legacy_collection/.venv/bin/python tests/lock/test_lock.sh`
 
 ## Repository Conventions
@@ -44,14 +44,16 @@ Run from repository root unless noted otherwise.
 
 ## Important CI Behavior To Preserve
 
-- Job order: `pre-commit`, `ansible-lint`, `sanity`, `discover` and `build` (when `build_collection`) all start after `validate-release` and run in parallel; `molecule` runs after `discover`; `check` needs all of them; on tag runs with publishing enabled, `build-collection` (GitHub-hosted, no secrets) runs after `check`, and `publish-automationhub` (artifact only, in the caller's environment) runs after `build-collection`.
-- `validate-release` refuses tag runs with `publish_to_automationhub` that would not test all roles (`test_all_roles_on_tag` and `force_all_roles` false) unless `allow_untested_publish`; keep its condition in sync with discover's "Set test scope" step.
+- Job order: `pre-commit`, `ansible-lint`, `sanity`, `changes` and `build` (when `build_collection`) all start after `validate-release` and run in parallel; `discover` (`contents: read`) runs after `changes`; `molecule` (unlocked scenarios, `contents: read`) and `molecule-lock` run after `discover`; `molecule-locked` (scenarios in `molecule_lock_scenarios`, `contents: read`) runs after `molecule-lock`, and `molecule-unlock` (`always()`) after `molecule-locked`. Only `changes` and the two lock jobs keep the caller's token, and they run no repository code (no `uv`, Molecule or pre-commit); `check` needs all of them; on tag runs with publishing enabled, `build-collection` (GitHub-hosted, no secrets) runs after `check`, and `publish-automationhub` (artifact only, in the caller's environment) runs after `build-collection`.
+- `validate-release` refuses tag runs with `publish_to_automationhub` that would not test all roles (`test_all_roles_on_tag` and `force_all_roles` false) unless `allow_untested_publish`; keep its condition in sync with the `changes` job's "Set test scope" step.
 - Sanity matrix comes from the `sanity_ansible_versions` input (default `stable-2.16`, `stable-2.17`, `stable-2.18`).
 - All actions, including first-party `actions/*`, are pinned to release commit SHAs with a `# vX.Y.Z` comment. The repository setting "require SHA pinning" enforces this, so a tag reference fails the run.
 - Discovery must continue to:
   - Respect `force_all_roles` and event-based full-run conditions.
   - Map changed files to roles (`roles/<role>/`, `extensions/molecule/<role>/`) and select all roles for shared Molecule files, `molecule_env_file` and `molecule_all_roles_paths`.
-  - Handle Molecule "glob failed" as a skip condition, not a hard failure.
+  - Handle Molecule "glob failed" as a skip condition (with a warning) only when no `molecule.yml` exists; any other `molecule list` failure fails discovery.
+  - Run native scenarios whose top folder is no role whenever all roles are selected.
+  - Keep changeset selection (`dorny/paths-filter`, which needs the caller's token and checkout credentials) in `changes`, and everything that runs caller code (`uv sync`, `molecule list`) in `discover` with `contents: read` and `persist-credentials: false`.
   - Deduplicate discovered role/scenario pairs before matrix fan-out.
 - Final `check` job is used for branch protection and must aggregate upstream status.
 
