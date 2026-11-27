@@ -22,6 +22,11 @@ on:
         required: false
         default: ''
         type: string
+      ref:
+        description: 'Branch, tag or commit of the calling repository to build; defaults to the ref of the run'
+        required: false
+        default: ''
+        type: string
       context:
         description: 'Build context, relative to the repository root'
         required: false
@@ -93,6 +98,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       # Callers build several images of one run in parallel on runners that can share a docker daemon.
@@ -120,7 +126,7 @@ jobs:
           docker build --pull \
             --file "$DOCKERFILE" \
             --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
             "${arguments[@]}" \
             --tag "$LOCAL_IMAGE" \
             "$CONTEXT"
