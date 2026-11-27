@@ -162,8 +162,8 @@ jobs:
     steps:
       # A tag usually points at a commit already on the default branch, so its
       # changeset is empty: without testing all roles Molecule is skipped and
-      # check still passes. Mirrors the all_roles conditions of discover's
-      # "Set test scope" step.
+      # check still passes. Mirrors the all_roles conditions of the changes
+      # job's "Set test scope" step.
       - name: Require Molecule tests of all roles before publishing
         if: ${{ inputs.publish_to_automationhub && github.ref_type == 'tag' }}
         env:
@@ -401,25 +401,29 @@ jobs:
         run: docker image ls --digests --filter 'reference=quay.io/ansible/*'
 
 
-  # Every other job declares the permissions it needs. discover keeps the
+  # Every other job declares the permissions it needs. changes keeps the
   # caller's token as granted: dorny/paths-filter needs pull-requests: read on
   # pull_request events in private repositories, and requesting a scope the
-  # caller did not grant would stop the whole workflow from starting.
-  discover:  # zizmor: ignore[excessive-permissions]
+  # caller did not grant would stop the whole workflow from starting. With
+  # molecule_lock_scenarios that token can also write, so changes runs no code
+  # of the calling repository (no uv, no Molecule); only its file names and
+  # directories are read. discover runs that code with contents: read.
+  changes:  # zizmor: ignore[excessive-permissions]
     runs-on: ubuntu-latest
     # Only needs validate-release, so Molecule (the slowest job) runs in parallel
     # with pre-commit, ansible-lint and sanity. check still waits for all of them.
     needs: validate-release
-    timeout-minutes: 15
+    timeout-minutes: 10
     outputs:
-      role_scenarios: ${{ steps.discover-scenarios.outputs.role_scenarios }}
-      molecule_unlocked: ${{ steps.molecule-plan.outputs.unlocked }}
-      molecule_locked: ${{ steps.molecule-plan.outputs.locked }}
+      # Space-separated role folders to discover scenarios for.
+      roles: ${{ steps.scope.outputs.all_roles == 'true' && steps.list-roles.outputs.role_folders || steps.changed-roles.outputs.role_folders }}
+      # true when all roles are tested (test scope or changeset).
+      all_roles: ${{ steps.scope.outputs.all_roles == 'true' || steps.changed-roles.outputs.all_roles == 'true' }}
     steps:
-      # Credentials are kept only until the changeset is known: dorny/paths-filter
-      # runs git fetch on push events, which needs them for private and internal
-      # repositories. "Remove checkout credentials" drops them before any code of
-      # the calling repository (uv sync, molecule list) runs.
+      # dorny/paths-filter runs git fetch on push events, which needs the
+      # credentials for private and internal repositories. No later step of
+      # this job runs repository code, and actions/checkout removes them when
+      # the job ends.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: true  # zizmor: ignore[artipacked]
@@ -523,28 +527,22 @@ jobs:
           echo "role_folders=${folders[*]}" >> "$GITHUB_OUTPUT"
           echo "all_roles=$all_roles" >> "$GITHUB_OUTPUT"
 
-      # actions/checkout v6+ stores the token in $RUNNER_TEMP/git-credentials-<uuid>.config,
-      # included from .git/config through includeIf.gitdir entries (one for the
-      # host path, one for the container path /github/workspace, each also for
-      # worktrees); older versions write http.<server>/.extraheader directly.
-      # Remove both, then fail if git still resolves an extraheader.
-      - name: Remove checkout credentials
-        run: |
-          git config --local --unset-all "http.$GITHUB_SERVER_URL/.extraheader" || true
-          while IFS= read -r -d '' entry; do
-            key=${entry%%$'\n'*}
-            value=${entry#*$'\n'}
-            if [[ "$value" =~ git-credentials-[0-9A-Fa-f-]+\.config$ ]]; then
-              git config --local --fixed-value --unset-all "$key" "$value"
-            fi
-          done < <(git config --local -z --get-regexp '^includeif\.' || true)
-          # The container entries name the same file under /github/runner_temp.
-          rm -f "$RUNNER_TEMP"/git-credentials-*.config
-          if git config --get-regexp '^http\..*\.extraheader$' > /dev/null; then
-            echo "::error::git still has an http extraheader after removing the checkout credentials"
-            git config --list --show-origin --name-only >&2
-            exit 1
-          fi
+  # Runs code of the calling repository (uv build backends, molecule list), so
+  # it only gets contents: read and checks out without credentials.
+  discover:
+    runs-on: ubuntu-latest
+    needs: changes
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      role_scenarios: ${{ steps.discover-scenarios.outputs.role_scenarios }}
+      molecule_unlocked: ${{ steps.molecule-plan.outputs.unlocked }}
+      molecule_locked: ${{ steps.molecule-plan.outputs.locked }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
@@ -559,10 +557,8 @@ jobs:
       - name: Discover scenarios for each role
         id: discover-scenarios
         env:
-          ALL_ROLES: ${{ steps.scope.outputs.all_roles }}
-          LISTED_ROLES: ${{ steps.list-roles.outputs.role_folders }}
-          CHANGED_ROLES: ${{ steps.changed-roles.outputs.role_folders }}
-          CHANGED_ALL_ROLES: ${{ steps.changed-roles.outputs.all_roles }}
+          ALL_ROLES: ${{ needs.changes.outputs.all_roles }}
+          ROLES: ${{ needs.changes.outputs.roles }}
           COLLECTION_PATH: ${{ inputs.collection-path }}
           MOLECULE_SCENARIOS: ${{ inputs.molecule_scenarios }}
           MOLECULE_LOCK_SCENARIOS: ${{ inputs.molecule_lock_scenarios }}
@@ -608,11 +604,7 @@ jobs:
           fi
 
           folders=()
-          if [[ "$ALL_ROLES" == "true" ]]; then
-            read -r -a folders <<< "$LISTED_ROLES"
-          else
-            read -r -a folders <<< "$CHANGED_ROLES"
-          fi
+          read -r -a folders <<< "$ROLES"
 
           mapfile -t candidate_folders < <(printf "%s\n" "${folders[@]}" | sed '/^$/d' | sort -u)
           # Collection role names are [a-z0-9_]; anything else under roles/ is
@@ -759,7 +751,7 @@ jobs:
                   if ! printf "%s\n" "${unique_folders[@]}" | grep -Fxq "$role"; then
                     continue
                   fi
-                elif [[ "$ALL_ROLES" != "true" && "$CHANGED_ALL_ROLES" != "true" ]]; then
+                elif [[ "$ALL_ROLES" != "true" ]]; then
                   # A scenario whose top folder is no role runs with all roles:
                   # a change to its files selects all roles.
                   continue
@@ -1344,6 +1336,7 @@ jobs:
       - pre-commit
       - ansible-lint
       - sanity
+      - changes
       - discover
       - molecule
       - molecule-lock

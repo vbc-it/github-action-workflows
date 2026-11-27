@@ -45,8 +45,8 @@ jobs:
       molecule_base_config: tests/ansible_collections/legacy_collection/resources/molecule-base.yml
       ansible_config: tests/ansible_collections/legacy_collection/resources/ansible.cfg
 
-  # Unit tests of the discover step script, including the cases that must
-  # fail discover (which a call of the reusable workflow cannot assert).
+  # Unit tests of the changes and discover step scripts, including the cases
+  # that must fail discover (which a call of the reusable workflow cannot assert).
   discover-logic:
     runs-on: ubuntu-latest
     timeout-minutes: 15
