@@ -51,7 +51,9 @@ Run from repository root unless noted otherwise.
 - Discovery must continue to:
   - Respect `force_all_roles` and event-based full-run conditions.
   - Map changed files to roles (`roles/<role>/`, `extensions/molecule/<role>/`) and select all roles for shared Molecule files, `molecule_env_file` and `molecule_all_roles_paths`.
-  - Handle Molecule "glob failed" as a skip condition, not a hard failure.
+  - Handle Molecule "glob failed" as a skip condition (with a warning) only when no `molecule.yml` exists; any other `molecule list` failure fails discovery.
+  - Run native scenarios whose top folder is no role whenever all roles are selected.
+  - Remove the checkout credentials after `dorny/paths-filter` and before any step that runs caller code (`uv sync`, `molecule list`).
   - Deduplicate discovered role/scenario pairs before matrix fan-out.
 - Final `check` job is used for branch protection and must aggregate upstream status.
 
