@@ -31,7 +31,7 @@ Run from repository root unless noted otherwise.
   - `cd tests/ansible_collections/native_collection && uv run molecule list -f yaml`
 - Discover step unit tests (needs bash 4+, jq and both fixtures synced):
   - `tests/discover/test_discover.sh`
-- Lock step tests against a mock GitHub API (needs bash 4+, curl, jq, PyYAML):
+- Lock job and Molecule plan tests against a mock GitHub API (needs bash 4+, curl, jq, PyYAML):
   - `PYTHON=tests/ansible_collections/legacy_collection/.venv/bin/python tests/lock/test_lock.sh`
 
 ## Repository Conventions
@@ -44,7 +44,7 @@ Run from repository root unless noted otherwise.
 
 ## Important CI Behavior To Preserve
 
-- Job order: `pre-commit`, `ansible-lint`, `sanity`, `discover` and `build` (when `build_collection`) all start after `validate-release` and run in parallel; `molecule` runs after `discover`; `check` needs all of them; on tag runs with publishing enabled, `build-collection` (GitHub-hosted, no secrets) runs after `check`, and `publish-automationhub` (artifact only, in the caller's environment) runs after `build-collection`.
+- Job order: `pre-commit`, `ansible-lint`, `sanity`, `discover` and `build` (when `build_collection`) all start after `validate-release` and run in parallel; `molecule` (unlocked scenarios, `contents: read`) and `molecule-lock` run after `discover`; `molecule-locked` (scenarios in `molecule_lock_scenarios`, `contents: read`) runs after `molecule-lock`, and `molecule-unlock` (`always()`) after `molecule-locked`. Only the two lock jobs keep the caller's write token, and they run no repository code; `check` needs all of them; on tag runs with publishing enabled, `build-collection` (GitHub-hosted, no secrets) runs after `check`, and `publish-automationhub` (artifact only, in the caller's environment) runs after `build-collection`.
 - `validate-release` refuses tag runs with `publish_to_automationhub` that would not test all roles (`test_all_roles_on_tag` and `force_all_roles` false) unless `allow_untested_publish`; keep its condition in sync with discover's "Set test scope" step.
 - Sanity matrix comes from the `sanity_ansible_versions` input (default `stable-2.16`, `stable-2.17`, `stable-2.18`).
 - All actions, including first-party `actions/*`, are pinned to release commit SHAs with a `# vX.Y.Z` comment. The repository setting "require SHA pinning" enforces this, so a tag reference fails the run.

@@ -39,10 +39,11 @@ Minimum caller permissions:
 |---|---|
 | public | `contents: read` |
 | internal or private | `contents: read` and `pull-requests: read` |
-| any, with `molecule_lock_scenarios` | `contents: write` instead of `contents: read` |
+| any, with `molecule_lock_scenarios` | also `contents: write` instead of `contents: read`, and `actions: read` |
 
 - `pull-requests: read` is needed because `discover` reads the changed files of a pull request through the GitHub API (`dorny/paths-filter`). Without it, `discover` fails on `pull_request` events with "Resource not accessible by integration".
-- The reusable workflow requests no permissions of its own: a called workflow can never get more than its caller grants, and a job that asked for more would stop the whole run from starting. Every job except `discover` and `molecule` reduces the token further to what it needs (`contents: read` or nothing); `discover` and `molecule` use the token as the caller grants it, so that only callers that use `molecule_lock_scenarios` need to grant `contents: write`. Grant write only on the calling job and only when you use locks: it reaches the Molecule jobs, which run the code under test.
+- The reusable workflow requests no permissions of its own: a called workflow can never get more than its caller grants, and a job that asked for more would stop the whole run from starting. GitHub checks this when the run starts, before any `if:`, so it also applies to jobs that would be skipped. Every job except `discover`, `molecule-lock` and `molecule-unlock` reduces the token further to what it needs (`contents: read` or nothing); in particular both Molecule jobs, which run the code under test, always get `contents: read` only. `discover` uses the token as the caller grants it (see `pull-requests: read` below). `molecule-lock` and `molecule-unlock` also use it as granted, so that only callers that use `molecule_lock_scenarios` need to grant `contents: write` and `actions: read`; they run on a GitHub-hosted runner, check out nothing and run no code from the repository.
+- Grant `contents: write` only on the calling job that sets `molecule_lock_scenarios`. `discover` then holds it too while it runs `uv sync` and `molecule list` on the branch under test.
 - If the caller sets no `permissions:`, the repository or organisation default for `GITHUB_TOKEN` applies. Declare them explicitly so the run does not depend on that setting.
 
 Inputs:
@@ -59,8 +60,15 @@ Inputs:
 - `molecule_all_roles_paths` (string, default: `plugins/*`, `requirements.yml`, `tests/requirements.yml`, `pyproject.toml`, `uv.lock`): newline-separated shell patterns, relative to `collection-path`, whose changes run the scenarios of all roles (`*` also matches `/`)
 - `molecule_timeout_minutes` (number, default: `120`): timeout for each Molecule scenario job
 - `molecule_scenarios` (string, default: `''`): JSON object that selects scenarios per role, like the `roleConfigs` of the Jenkins pipeline, e.g. `'{"ssh": ["default", "hostbased"], "certificate": []}'`. A listed role runs only the listed scenarios and `[]` excludes the role. Unlike Jenkins, a role that is not listed still runs all its scenarios. Discovery fails when the JSON is invalid, a key is not a role under `roles/`, or a listed scenario of a selected role was not discovered. For native layouts a scenario can be given as Molecule names it (`role2/scenario1`) or without the role prefix (`scenario1`). Empty (the default) runs every discovered scenario
-- `molecule_max_parallel` (number, default: `0`): maximum number of Molecule scenario jobs that run at the same time (the matrix `max-parallel`); `0` means no limit
-- `molecule_lock_scenarios` (string, default: `'[]'`): JSON list of scenarios that must never run at the same time, across all runs of the repository, e.g. `'["certificate/create"]'`. Use `<role>/<scenario>` for legacy layouts and the Molecule scenario name (as printed by `discover`) for native layouts. Before `molecule test`, a listed scenario's job takes a mutex: it creates the branch `molecule-lock/<role>/<scenario>` (`/` in native names becomes `__`) through the GitHub API, which fails while another job holds it. Waiting jobs poll every 15 to 30 seconds and are never cancelled; the order among several waiters is not guaranteed. The lock is released (the branch deleted) after the Molecule step, also when it fails or the job is cancelled. Waiting counts towards `molecule_timeout_minutes`. A lock whose holder died without releasing it (e.g. a lost runner) is removed by the next waiter once it is older than `molecule_timeout_minutes` + 5 minutes; delete the branch by hand to free it sooner. Needs `contents: write` (see above), `curl` and `jq` on the runner, and branch rules that let `GITHUB_TOKEN` create and delete `molecule-lock/*` branches. Branches created with `GITHUB_TOKEN` do not trigger workflows. Other scenarios, including other scenarios of the same role, take no lock. Prefer deriving shared external names from `INSTANCE_ID` where possible
+- `molecule_max_parallel` (number, default: `0`): maximum number of Molecule scenario jobs that run at the same time (the matrix `max-parallel`); `0` means no limit. Scenarios in `molecule_lock_scenarios` run in a second matrix job (`molecule-locked`) with its own limit, so up to twice this many can run at once
+- `molecule_lock_scenarios` (string, default: `'[]'`): JSON list of scenarios that must never run at the same time, across all runs of the repository, e.g. `'["certificate/create"]'`. Use `<role>/<scenario>` for legacy layouts and the Molecule scenario name (as printed by `discover`) for native layouts. Listed scenarios run in the `molecule-locked` matrix job instead of `molecule`, between two jobs that hold the write token and run no repository code:
+  - `molecule-lock` takes a mutex for each listed scenario of the run: it creates the branch `molecule-lock/<role>/<scenario>` (`/` in native names becomes `__`) through the GitHub API, which fails while another run holds it. It takes the locks one by one in name order, so two runs never wait for each other's locks. Waiting runs poll every 15 to 30 seconds and are never cancelled; the order among several waiters is not guaranteed. Waiting counts towards `molecule_timeout_minutes` (the timeout of `molecule-lock`).
+  - `molecule-locked` runs the listed scenarios with `contents: read`. Its first step checks that the run still holds the lock and fails otherwise: use "Re-run all jobs" for a run with locks, since "Re-run failed jobs" does not take the locks again.
+  - `molecule-unlock` deletes the branches after `molecule-locked`, also when it fails or the run is cancelled. All locks of a run are held from `molecule-lock` until `molecule-unlock`, including while `molecule-locked` waits for a runner.
+  - A lock whose holder run has completed without releasing it is removed by the next waiter (it reads the run's status, hence `actions: read`); a lock of a run that is still in progress is never removed. Delete the branch by hand to free a lock sooner. Branches not created by this workflow are never removed.
+  - Needs `contents: write` and `actions: read` (see above), GitHub-hosted `ubuntu-latest` runners for the two lock jobs (they use runner minutes while waiting), and branch rules that let `GITHUB_TOKEN` create and delete `molecule-lock/*` branches. Branches created with `GITHUB_TOKEN` do not trigger workflows. Other scenarios, including other scenarios of the same role, take no lock and do not wait. Prefer deriving shared external names from `INSTANCE_ID` where possible
+- `molecule_secret_scenarios` (string, default: `'["*"]'`): JSON list of scenarios (same names as `molecule_lock_scenarios`) whose Molecule step receives `op_service_account_token` and `galaxy_server_token`; `"*"` means every scenario. The jobs of other scenarios get neither secret (the op CLI is not installed either). The default keeps the behaviour of earlier versions; list only the scenarios that need the secrets (see "Secrets in Molecule jobs")
+- `galaxy_token_servers` (string, default: `published rh_certified community staging`): space-separated Galaxy server names (as in `[galaxy] server_list`) whose `ANSIBLE_GALAXY_SERVER_<NAME>_TOKEN` is set to `galaxy_server_token`. List only servers that point to the server the token belongs to; the default keeps the behaviour of earlier versions
 - `molecule_base_config` (string, default: `''`): repository-relative path of a Molecule base config, passed as `molecule --base-config` to `molecule dependency` and `molecule test`. It replaces Molecule's default base config (`.config/molecule/config.yml`, or `extensions/molecule/config.yml` in native layouts), so include that content if you need it
 - `ansible_config` (string, default: `''`): repository-relative path of an `ansible.cfg`, exported as `ANSIBLE_CONFIG` before `molecule_env_file` is sourced. It applies to `molecule dependency` (`ansible-galaxy`, e.g. private Galaxy or Automation Hub servers) and to commands outside Molecule's provisioner; the playbooks Molecule runs use the `ansible.cfg` Molecule generates, so use `provisioner.config_options` in `molecule.yml` or the base config for those
 - `build_collection` (boolean, default: `true`): build the collection tarball on every run with a fixed `ansible-core` release (no code from the repository runs) and upload it as an artifact; `check` needs this job, so a broken `galaxy.yml` or `build_ignore` fails CI. Set `false` to skip it
@@ -71,9 +79,18 @@ Inputs:
 Secrets:
 
 - `automationhub_token` (optional): required only when `publish_to_automationhub=true` on a tag run
-- `op_service_account_token` (optional): 1Password service account token, exported as `OP_SERVICE_ACCOUNT_TOKEN` in the Molecule step only, and only when set (for the `community.general.onepassword` lookups). When it is set, the Molecule job installs the 1Password CLI `op` 2.35.0 with `1password/install-cli-action`, which downloads it into the runner's tool cache (no root needed), checks its GPG signature and puts it on `PATH`; the runner needs `gpg` and `unzip`
-- `galaxy_server_token` (optional): exported as `ANSIBLE_GALAXY_SERVER_PUBLISHED_TOKEN`, `..._RH_CERTIFIED_TOKEN`, `..._COMMUNITY_TOKEN` and `..._STAGING_TOKEN` in the Molecule step only, and only when set. The server list and URLs come from `ansible_config` or `molecule_env_file`
+- `op_service_account_token` (optional): 1Password service account token, exported as `OP_SERVICE_ACCOUNT_TOKEN` in the Molecule step of the `molecule_secret_scenarios` only, and only when set (for the `community.general.onepassword` lookups). When it is set, the Molecule job installs the 1Password CLI `op` 2.35.0 with `1password/install-cli-action`, which downloads it into the runner's tool cache (no root needed), checks its GPG signature and puts it on `PATH`; the runner needs `gpg` and `unzip`
+- `galaxy_server_token` (optional): exported as `ANSIBLE_GALAXY_SERVER_<NAME>_TOKEN` for each name in `galaxy_token_servers` (by default `PUBLISHED`, `RH_CERTIFIED`, `COMMUNITY` and `STAGING`) in the Molecule step of the `molecule_secret_scenarios` only, and only when set. The server list and URLs come from `ansible_config` or `molecule_env_file`
 - Secrets are exported before `molecule_env_file` is sourced, so that file can override them. Pass them explicitly (or with `secrets: inherit`). GitHub does not pass secrets to `pull_request` runs from forks; do not work around that, since a fork's code would then receive them. Only pass them to runners you trust with them
+
+Secrets in Molecule jobs:
+
+- Molecule runs code from the branch under test: playbooks, `molecule.yml`, `molecule_env_file`, `ansible.cfg` and the build backends `uv sync` runs. Anyone who can push a branch to the calling repository can read every secret the Molecule step receives, and on persistent self-hosted runners code can outlive the job. Treat the secrets as readable by all of them.
+- Use a 1Password service account with read access to a dedicated test-only vault, never one that can read production vaults.
+- Use a read-only Galaxy or Automation Hub token for `galaxy_server_token`, never the token used for `automationhub_token` or any other token that can publish collections.
+- The token is sent to every server named in `galaxy_token_servers` whose URL the Ansible config sets. If your config maps one of those names to a public server (e.g. `community` to `https://galaxy.ansible.com/`), the token goes there: set `galaxy_token_servers` to the internal servers only.
+- Set `molecule_secret_scenarios` to the scenarios that need the secrets, and pass the secrets only on the events that need them (e.g. `${{ github.event_name != 'pull_request' && secrets.OP_SERVICE_ACCOUNT_TOKEN || '' }}`).
+- Secrets are only in the environment of the Molecule step, never in `GITHUB_ENV` or on a command line.
 
 Publishing:
 
@@ -186,7 +203,9 @@ concurrency:
 jobs:
     tests:
         permissions:
-            contents: write  # only because molecule_lock_scenarios is used; otherwise read
+            # write and actions: read only because molecule_lock_scenarios is used; otherwise contents: read
+            contents: write
+            actions: read
             pull-requests: read
         uses: your-org/github-action-workflows/.github/workflows/ansible-collection.yml@main
         secrets:
@@ -204,6 +223,9 @@ jobs:
             molecule_scenarios: '{"ssh": ["default", "hostbased"], "certificate": []}'
             molecule_max_parallel: 4
             molecule_lock_scenarios: '["certificate/create"]'
+            # Only these scenarios get op_service_account_token and galaxy_server_token
+            molecule_secret_scenarios: '["certificate/create", "ssh/default"]'
+            galaxy_token_servers: published
             molecule_base_config: .config/molecule/ci.yml
             ansible_config: .config/ansible.cfg
             # Defaults: build the tarball and upload JUnit reports on every run
